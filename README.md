@@ -1,77 +1,91 @@
-# IntentPay: The Intent-Centric Web3 Assistant 🤖⛓️
+# IntentPay
 
-IntentPay is not just a wallet; it's a **Cognitive Intent Layer** for the blockchain. While MetaMask is a tool for manual execution, this agent understands **human intent**, automates complex workflows, and brings "Web2-level" simplicity to decentralized finance.
+IntentPay is an AI-assisted Web3 transaction prototype. It translates natural-language payment intent into a structured transaction plan, then keeps execution behind an explicit wallet review step.
 
-![Vision](https://img.shields.io/badge/Vision-Intent--Centric-blueviolet)
-![Status](https://img.shields.io/badge/Status-Production--Ready--Roadmap-green)
+The project explores a safer product boundary for AI and blockchain applications: the model can interpret and prepare actions, but the user must still review and approve any irreversible on-chain transaction.
 
-## 🚀 The 5 Pillars of Real-World Utility
+## Why This Exists
 
-### 1. 🧠 Intent-Centric UX (Beyond Manual Clicks)
-MetaMask requires you to know the "how." This agent focuses on the "what."
-- **Use Case**: *"Split $100 in ETH between Alice and Bob."*
-- **Value**: The agent handles the math, fetches addresses, and prepares the multi-transaction flow.
+Crypto wallets expose powerful actions through low-level addresses, gas settings, contract calls, and transaction prompts. That is difficult for non-technical users and risky for teams that need guardrails.
 
-### 2. 💬 Conversational Commerce & Social Payments
-Seamlessly integrate crypto into chat-based environments (Telegram, Discord, Support Bots).
-- **Use Case**: *"Pay my share of the dinner to @subhajit."*
-- **Value**: Eliminates the friction of switching apps and copying 0x addresses.
+IntentPay experiments with a higher-level workflow:
 
-### 3. 📊 Complex DeFi Strategy Execution
-Automate multi-step DeFi actions that are usually intimidating for non-technical users.
-- **Use Case**: *"Move my idle ETH to the highest-yielding stablecoin pool."*
-- **Value**: The agent researches, calculates paths, and executes complex swaps/deposits in one sentence.
+1. A user describes what they want to do in natural language.
+2. The backend resolves intent, contacts, balances, and guardrails.
+3. The system prepares a structured transaction preview.
+4. The wallet remains the final execution boundary.
 
-### 4. 👤 Accessibility & Human-Readable Onboarding
-The "0x..." address format is a UX nightmare. We replace it with human handles.
-- **Use Case**: *"Send 0.05 ETH to @marketing_team."*
-- **Value**: Maps internal handles or ENS names to addresses, making crypto feel like Venmo or CashApp.
+## Core Flows
 
-### 5. 🛡️ Automated Treasury & Guardrails
-Enterprise-grade security for teams and DAOs through programmable constraints.
-- **Use Case**: *"Only allow payments to whitelisted vendors up to 1 ETH/day."*
-- **Value**: Adds a layer of "Smart Policy" that prevents theft or human error, even if the AI is misinterpreted.
+- Natural-language payments such as split payments and named recipients.
+- Handle and ENS-style recipient resolution.
+- Transaction preview before wallet execution.
+- Gas estimation and structured transaction errors.
+- Spending guardrails and whitelisted recipient concepts.
+- Transaction history with status and hashes.
+- Security event logging for suspicious or failed actions.
 
-## ✨ Features
+## Architecture
 
-- 🧠 **Context-Aware Intelligence**: Powered by OpenRouter (LLM) with real-time injection of user balance, contacts, and guardrails into every decision.
-- 🛡️ **Security Health Scoring**: Real-time monitoring of wallet activity with a dynamic security score and event logging.
-- ⚔️ **Adversarial Defense**: Hardened system prompts to prevent prompt injection, social engineering, and unauthorized identity changes.
-- 🔒 **Safe Wallet Pattern**: Sanitized API layer ensures private keys and password hashes never leave the secure backend logic.
-- 🚦 **Smart Guardrails**: Programmable daily spending limits and whitelisting to prevent unauthorized large transfers.
-- ⛽ **Gas-Aware Execution**: Robust transaction processing with real-time gas estimation, EIP-1559 support, and detailed error feedback.
-- 👥 **Handle & ENS Mapping**: Use names (@handle) or Ethereum Name Service (.eth) instead of addresses.
-- 💸 **Natural Language Payments**: Full support for complex, multi-recipient intents and split payments.
-- 📊 **Transaction History**: Persistent tracking of all on-chain activity with status badges (Success/Failed) and transaction hashes.
-- 🎨 **Modern Glassmorphism UI**: A high-end React dashboard with real-time updates, security badges, and "Thinking" state indicators.
+```text
+React client
+  Intent input, transaction preview, wallet-facing UI
 
-## 🛠️ Architecture
+Express API
+  Auth, contacts, guardrails, transaction planning, sanitized responses
 
-- **Backend**: Node.js + Express.js
-- **Blockchain**: Ethers.js v6 (Sepolia Testnet)
-- **AI Brain**: OpenRouter API with JSON-based tool-calling and **Dynamic Context Injection**.
-- **Security**: AES-256-GCM encryption + bcrypt hashing + **Security Event Logging** + **Sanitized API Responses**.
-- **Frontend**: React + Vite + Framer Motion + Lucide Icons + **Real-time Security Monitoring**.
+LLM adapter
+  Converts user intent into structured tool calls and transaction plans
 
-## 🚀 Getting Started
+Wallet/blockchain layer
+  Ethers.js, Sepolia RPC, gas estimation, transaction submission boundary
+
+Security layer
+  AES-256-GCM encrypted wallet data, bcrypt password hashing, event logs
+```
+
+## Safety Boundary
+
+IntentPay intentionally separates AI planning from blockchain execution.
+
+- The AI does not silently execute transactions.
+- The API sanitizes responses so private keys and password hashes do not leave backend logic.
+- Transaction details are prepared for review before signing.
+- Guardrails can restrict recipients and spending limits.
+- Failed or suspicious flows are recorded through security events.
+
+## Tech Stack
+
+- Node.js
+- Express.js
+- React
+- Vite
+- Ethers.js v6
+- OpenRouter-compatible LLM API
+- AES-256-GCM
+- bcrypt
+
+## Getting Started
 
 ### Prerequisites
-- **Node.js**: v18+
-- **OpenRouter API Key**: [openrouter.ai](https://openrouter.ai/)
-- **Sepolia ETH**: [Alchemy Faucet](https://www.alchemy.com/faucets/ethereum-sepolia)
 
-### Installation
-1. **Clone & Install Backend**:
-   ```bash
-   npm install
-   ```
-2. **Install Frontend**:
-   ```bash
-   cd frontend && npm install
-   ```
+- Node.js 18+
+- OpenRouter API key
+- Sepolia RPC endpoint
+- Sepolia test ETH
 
-### Configuration (.env)
-Create a `.env` file in the root directory:
+### Install
+
+```bash
+npm install
+cd frontend
+npm install
+```
+
+### Environment
+
+Create a `.env` file in the repository root:
+
 ```env
 PORT=3001
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
@@ -80,30 +94,45 @@ OPENROUTER_API_KEY=your_openrouter_key_here
 LLM_MODEL=meta-llama/llama-3.1-8b-instruct:free
 ```
 
-### Running the Project
-1. **Start Backend**: `node server.js`
-2. **Start Frontend**: `cd frontend && npm run dev`
-3. **Access**: Open `http://localhost:5173`
+Use a dedicated test key and testnet-only funds when experimenting locally.
 
----
+### Run
 
-> [!TIP]
-> **Try these commands in the AI Chat:**
-> - *"Remember @alice is 0x742..."*
-> - *"Send 0.01 ETH to @alice and 0.02 ETH to vitalik.eth"*
-> - *"Set my daily limit to 0.5 ETH"*
-> - *"What is my security status?"*
-> - *"What is my transaction history?"*
+```bash
+node server.js
+```
 
-> [!IMPORTANT]
-> **Security First**: The agent features a **Real-time Security Badge** in the dashboard. If you see a "Warning" or "Critical" status, check the security logs for suspicious activity or failed login attempts.
+In a second terminal:
 
-## 🗺️ Roadmap to Production
+```bash
+cd frontend
+npm run dev
+```
 
-To move from PoC to a Mainnet-ready production environment, we recommend:
-1. **HSM/MPC Integration**: Move server-side keys to Hardware Security Modules (AWS KMS or HashiCorp Vault) for the custodial mode.
-2. **Account Abstraction (ERC-4337)**: Replace simple EOA wallets with Smart Contract Wallets for better recovery, gas sponsorship, and social recovery.
-3. **Multi-Chain Support**: Expand beyond Sepolia to L2s like Base, Arbitrum, and Optimism for lower fees.
-4. **Advanced Guardrails**: Implement time-locks and multi-sig requirements for large transactions.
+Open:
 
----
+```text
+http://localhost:5173
+```
+
+## Example Prompts
+
+- "Remember @alice is 0x742..."
+- "Send 0.01 ETH to @alice and 0.02 ETH to vitalik.eth."
+- "Set my daily limit to 0.5 ETH."
+- "What is my security status?"
+- "Show my transaction history."
+
+## Tradeoffs
+
+- Server-side wallet storage is useful for prototyping custodial flows, but production systems should use HSM, MPC, account abstraction, or non-custodial signing models.
+- Natural-language UX reduces friction, but every generated action still needs visible review because blockchain transactions are irreversible.
+- LLM output must be treated as untrusted input and validated before it reaches transaction-building code.
+
+## Roadmap
+
+- Move sensitive key handling to HSM, KMS, MPC, or smart-account infrastructure.
+- Add ERC-4337 account abstraction for recovery, policies, and gas sponsorship.
+- Expand guardrails with time locks, approval thresholds, and multi-sig policies.
+- Add multi-chain support after the safety model is stable.
+- Add tests around intent parsing, guardrail enforcement, and transaction validation.
