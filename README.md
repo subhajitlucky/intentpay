@@ -4,6 +4,10 @@ IntentPay is an AI-assisted Web3 transaction prototype. It translates natural-la
 
 The project explores a safer product boundary for AI and blockchain applications: the model can interpret and prepare actions, but the user must still review and approve any irreversible on-chain transaction.
 
+- Status: Prototype
+- Portfolio case study: https://subhajitpradhan.vercel.app/projects/intentpay
+- Inspect the implementation: `ai-agent.js`, `wallet-manager.js`, and `frontend/`
+
 ## Why This Exists
 
 Crypto wallets expose powerful actions through low-level addresses, gas settings, contract calls, and transaction prompts. That is difficult for non-technical users and risky for teams that need guardrails.
