@@ -11,10 +11,78 @@ if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
   throw new Error('ENCRYPTION_KEY must be exactly 32 characters for AES-256');
 }
 
+const MAX_TRANSFER_WEI = ethers.parseEther('1000');
+const MAX_DAILY_LIMIT_WEI = ethers.parseEther('1000000');
+const DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
+
 // Create data directory if it doesn't exist
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.INTENTPAY_DATA_DIR
+  ? path.resolve(process.env.INTENTPAY_DATA_DIR)
+  : path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Strict plain-decimal only. Rejects hex, exponents, Infinity, negatives and empty values.
+function toDecimalString(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return DECIMAL_PATTERN.test(trimmed) ? trimmed : null;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value < 0) return null;
+    return value.toFixed(18);
+  }
+  if (typeof value === 'bigint') {
+    return value < 0n ? null : ethers.formatEther(value);
+  }
+  return null;
+}
+
+// Single source of truth for turning untrusted amounts into exact wei.
+function toWeiAmount(value, { allowZero = false, maxWei = MAX_TRANSFER_WEI } = {}) {
+  const text = toDecimalString(value);
+  if (text === null) return null;
+
+  let wei;
+  try {
+    wei = ethers.parseEther(text);
+  } catch (e) {
+    return null;
+  }
+
+  if (wei > maxWei) return null;
+  if (wei === 0n && !allowZero) return null;
+  return wei;
+}
+
+function formatEthAmount(wei) {
+  try {
+    return ethers.formatEther(BigInt(wei));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Accepts either a wei integer or an ETH decimal, always capped at the transfer maximum.
+function toTransferWei({ amount, amountWei } = {}) {
+  if (amountWei !== undefined && amountWei !== null && amountWei !== '') {
+    const raw = String(amountWei).trim();
+    if (!/^\d+$/.test(raw)) return null;
+    let wei;
+    try {
+      wei = BigInt(raw);
+    } catch (e) {
+      return null;
+    }
+    return wei > 0n && wei <= MAX_TRANSFER_WEI ? wei : null;
+  }
+  return toWeiAmount(amount);
+}
+
+function storedWei(value) {
+  const wei = toWeiAmount(value, { allowZero: true, maxWei: MAX_DAILY_LIMIT_WEI });
+  return wei === null ? 0n : wei;
 }
 
 const WALLETS_FILE = path.join(DATA_DIR, 'wallets.json');
@@ -67,6 +135,20 @@ function decryptPrivateKey(encryptedData, iv, authTag, encryptionKey) {
 function deriveKey(password, salt) {
   // PBKDF2 with 100,000 iterations, 32 bytes (256 bits), sha256
   return crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256');
+}
+
+function sealSecret(plaintext) {
+  if (typeof plaintext !== 'string' || plaintext.length === 0) return null;
+  return encryptPrivateKey(plaintext, Buffer.from(ENCRYPTION_KEY));
+}
+
+function unsealSecret(sealed) {
+  if (!sealed || !sealed.encryptedData || !sealed.iv || !sealed.authTag) return null;
+  try {
+    return decryptPrivateKey(sealed.encryptedData, sealed.iv, sealed.authTag, Buffer.from(ENCRYPTION_KEY));
+  } catch (e) {
+    return null;
+  }
 }
 
 // Load all wallets
@@ -367,12 +449,36 @@ function listWallets() {
 function addContact(userId, handle, address) {
   const wallets = loadWallets();
   if (!wallets[userId]) return { success: false, message: 'User not found' };
-  
+
+  if (typeof handle !== 'string') {
+    return { success: false, message: 'Contact handle must be a text value.' };
+  }
+
+  const trimmedHandle = handle.trim();
+  if (!/^@[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?$/i.test(trimmedHandle)) {
+    return { success: false, message: 'Contact handles must look like @alice.' };
+  }
+
+  if (typeof address !== 'string') {
+    return { success: false, message: 'Contact address must be a text value.' };
+  }
+
+  const trimmedAddress = address.trim();
+  const isValidTarget = ethers.isAddress(trimmedAddress) || /^[a-z0-9-]+\.eth$/i.test(trimmedAddress);
+  if (!isValidTarget) {
+    return { success: false, message: 'Contact address must be a 0x address or an ENS name.' };
+  }
+
   if (!wallets[userId].contacts) wallets[userId].contacts = {};
-  wallets[userId].contacts[handle.toLowerCase()] = address;
-  
+  const key = trimmedHandle.toLowerCase();
+  const previous = wallets[userId].contacts[key];
+  if (previous && previous.toLowerCase() !== trimmedAddress.toLowerCase()) {
+    return { success: false, message: `${trimmedHandle} is already saved as ${previous}. Remove it first if you want to change it.` };
+  }
+  wallets[userId].contacts[key] = trimmedAddress;
+
   saveWallets(wallets);
-  return { success: true, message: `Contact ${handle} added.` };
+  return { success: true, message: `Contact ${trimmedHandle} added.` };
 }
 
 // Get contact address
@@ -390,50 +496,163 @@ function updateGuardrails(userId, dailyLimit, whitelist) {
   if (!wallets[userId].guardrails) {
     wallets[userId].guardrails = { dailyLimit: "1.0", spentToday: "0", lastSpentDate: new Date().toISOString().split('T')[0], whitelist: [] };
   }
-  
-  if (dailyLimit) wallets[userId].guardrails.dailyLimit = dailyLimit.toString();
-  if (whitelist) wallets[userId].guardrails.whitelist = whitelist;
-  
+
+  if (dailyLimit !== undefined && dailyLimit !== null && dailyLimit !== '') {
+    const limitWei = toWeiAmount(dailyLimit, { allowZero: true, maxWei: MAX_DAILY_LIMIT_WEI });
+    if (limitWei === null) {
+      return { success: false, message: 'Daily limit must be a non-negative number of ETH.' };
+    }
+    wallets[userId].guardrails.dailyLimit = ethers.formatEther(limitWei);
+  }
+
+  let ignoredEntries = 0;
+  if (whitelist !== undefined && whitelist !== null) {
+    if (!Array.isArray(whitelist)) {
+      return { success: false, message: 'Whitelist must be a list of Ethereum addresses.' };
+    }
+    const cleaned = [];
+    for (const entry of whitelist) {
+      if (typeof entry === 'string' && ethers.isAddress(entry.trim())) {
+        const normalized = entry.trim();
+        if (!cleaned.some((a) => a.toLowerCase() === normalized.toLowerCase())) cleaned.push(normalized);
+      } else {
+        ignoredEntries += 1;
+      }
+    }
+    wallets[userId].guardrails.whitelist = cleaned;
+  }
+
   saveWallets(wallets);
-  return { success: true, message: 'Guardrails updated.' };
+  const suffix = ignoredEntries > 0 ? ` ${ignoredEntries} invalid address(es) were ignored.` : '';
+  return { success: true, message: `Guardrails updated.${suffix}` };
 }
 
-// Check and update daily limit
-function checkAndUpdateLimit(userId, amount) {
-  const wallets = loadWallets();
-  const user = wallets[userId];
-  if (!user || !user.guardrails) return true; // No guardrails, allow
+// An empty whitelist means "no recipient restriction configured".
+function isAddressWhitelisted(userId, address) {
+  const wallet = getWallet(userId);
+  const whitelist = wallet?.guardrails?.whitelist;
+  if (!Array.isArray(whitelist) || whitelist.length === 0) return true;
+  if (typeof address !== 'string' || !ethers.isAddress(address.trim())) return false;
+  const target = address.trim().toLowerCase();
+  return whitelist.some((entry) => typeof entry === 'string' && entry.trim().toLowerCase() === target);
+}
 
+// Returns the first recipient that policy rejects, or null when all are allowed.
+function findBlockedRecipient(userId, recipients = []) {
+  for (const recipient of recipients) {
+    if (!isAddressWhitelisted(userId, recipient?.to)) return recipient;
+  }
+  return null;
+}
+
+function rollGuardrailDay(user) {
   const today = new Date().toISOString().split('T')[0];
   if (user.guardrails.lastSpentDate !== today) {
     user.guardrails.spentToday = "0";
     user.guardrails.lastSpentDate = today;
+    return true;
+  }
+  return false;
+}
+
+// Reserve spend against the daily cap before broadcasting, so concurrent
+// payments cannot both pass the check. Release the reservation if the send fails.
+function reserveDailySpend(userId, amount) {
+  const amountWei = toWeiAmount(amount);
+  if (amountWei === null) {
+    return { ok: false, reason: 'Transfer amount must be a positive number of ETH.' };
   }
 
-  const spent = parseFloat(user.guardrails.spentToday);
-  const limit = parseFloat(user.guardrails.dailyLimit);
-  const requested = parseFloat(amount);
+  const wallets = loadWallets();
+  const user = wallets[userId];
+  if (!user) return { ok: false, reason: 'User not found' };
+  if (!user.guardrails) return { ok: true, reservedWei: amountWei };
 
-  if (spent + requested > limit) {
-    return false;
+  const rolled = rollGuardrailDay(user);
+  const spentWei = storedWei(user.guardrails.spentToday);
+  const limitWei = toWeiAmount(user.guardrails.dailyLimit, { allowZero: true, maxWei: MAX_DAILY_LIMIT_WEI });
+  const capWei = limitWei === null ? MAX_DAILY_LIMIT_WEI : limitWei;
+
+  if (spentWei + amountWei > capWei) {
+    if (rolled) saveWallets(wallets);
+    return {
+      ok: false,
+      reason: `Daily spending limit exceeded. Limit is ${ethers.formatEther(capWei)} ETH, ${ethers.formatEther(spentWei)} ETH already used today, ${ethers.formatEther(amountWei)} ETH requested.`,
+      spentWei,
+      capWei
+    };
   }
 
-  user.guardrails.spentToday = (spent + requested).toString();
+  user.guardrails.spentToday = ethers.formatEther(spentWei + amountWei);
+  saveWallets(wallets);
+  return { ok: true, reservedWei: amountWei };
+}
+
+function releaseDailySpend(userId, amount) {
+  const amountWei = toWeiAmount(amount);
+  if (amountWei === null) return false;
+
+  const wallets = loadWallets();
+  const user = wallets[userId];
+  if (!user || !user.guardrails) return false;
+
+  const spentWei = storedWei(user.guardrails.spentToday);
+  const remaining = spentWei > amountWei ? spentWei - amountWei : 0n;
+  user.guardrails.spentToday = ethers.formatEther(remaining);
   saveWallets(wallets);
   return true;
+}
+
+function getDailySpendState(userId) {
+  const wallet = getWallet(userId);
+  if (!wallet || !wallet.guardrails) return null;
+  const today = new Date().toISOString().split('T')[0];
+  const isCurrentDay = wallet.guardrails.lastSpentDate === today;
+  return {
+    dailyLimitWei: storedWei(wallet.guardrails.dailyLimit),
+    spentTodayWei: isCurrentDay ? storedWei(wallet.guardrails.spentToday) : 0n,
+    lastSpentDate: wallet.guardrails.lastSpentDate
+  };
 }
 
 // Record a transaction
 function recordTransaction(userId, txData) {
   const wallets = loadWallets();
-  if (!wallets[userId]) return;
-  
+  if (!wallets[userId]) return false;
+
+  if (!txData || typeof txData !== 'object') return false;
+
+  const to = typeof txData.to === 'string' ? txData.to.trim() : '';
+  if (!to || (!to.startsWith('@') && !ethers.isAddress(to))) return false;
+
+  const amountWei = toWeiAmount(txData.amount, { allowZero: true });
+  if (amountWei === null) return false;
+
+  const allowedStatuses = ['success', 'failed', 'pending'];
+  const status = allowedStatuses.includes(txData.status) ? txData.status : 'pending';
+  const allowedTypes = ['send', 'receive', 'guardrail', 'security'];
+  const type = allowedTypes.includes(txData.type) ? txData.type : 'send';
+  const hash = typeof txData.hash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(txData.hash.trim())
+    ? txData.hash.trim()
+    : null;
+  const mode = txData.mode === 'non-custodial' ? 'non-custodial' : 'custodial';
+  const errorText = typeof txData.error === 'string' ? txData.error.slice(0, 500) : null;
+
   if (!wallets[userId].transactions) wallets[userId].transactions = [];
   
-  wallets[userId].transactions.unshift({
-    ...txData,
+  const entry = {
+    type,
+    to,
+    amount: ethers.formatEther(amountWei),
+    status,
+    mode,
     timestamp: new Date().toISOString()
-  });
+  };
+  if (hash) entry.hash = hash;
+  if (errorText) entry.error = errorText;
+  if (/^\d{1,30}$/.test(String(txData.gasUsed ?? ''))) entry.gasUsed = String(txData.gasUsed);
+
+  wallets[userId].transactions.unshift(entry);
   
   // Keep only last 50 transactions
   if (wallets[userId].transactions.length > 50) {
@@ -441,6 +660,7 @@ function recordTransaction(userId, txData) {
   }
   
   saveWallets(wallets);
+  return true;
 }
 
 // Log a security event
@@ -506,6 +726,11 @@ function saveSessions(sessions) {
 
 // Export functions
 module.exports = {
+  toWeiAmount,
+  toTransferWei,
+  formatEthAmount,
+  sealSecret,
+  unsealSecret,
   createWallet,
   getWallet,
   getSafeWallet,
@@ -520,7 +745,11 @@ module.exports = {
   addContact,
   getContactAddress,
   updateGuardrails,
-  checkAndUpdateLimit,
+  isAddressWhitelisted,
+  findBlockedRecipient,
+  reserveDailySpend,
+  releaseDailySpend,
+  getDailySpendState,
   recordTransaction,
   logSecurityEvent,
   getSecurityStatus,

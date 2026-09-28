@@ -55,8 +55,22 @@ IntentPay intentionally separates AI planning from blockchain execution.
 - The AI does not silently execute transactions.
 - The API sanitizes responses so private keys and password hashes do not leave backend logic.
 - Transaction details are prepared for review before signing.
-- Guardrails can restrict recipients and spending limits.
+- Guardrails restrict recipients and spending limits, and are re-checked at execution time.
 - Failed or suspicious flows are recorded through security events.
+
+The execution boundary holds under adversarial input:
+
+- Model output is treated as untrusted. Amounts are converted to exact wei with a
+  strict decimal parser, so hex, exponents, negative values and `NaN` are rejected
+  before any balance or limit math runs.
+- Every recipient is validated as an address, checked against the whitelist, and
+  blocked from being the sending address.
+- Daily limits are reserved before a transaction is broadcast and released again
+  when the send fails, so a failed transfer never consumes the allowance.
+- A payment must be released with `intentpay confirm code <payment-secret>`, the
+  secret is bcrypt-verified locally and never sent to the model, and repeated
+  failures trigger a lockout.
+- The staged payment expires after two minutes and is discarded by any other message.
 
 ## Tech Stack
 
@@ -119,6 +133,20 @@ Open:
 http://localhost:5173
 ```
 
+### Test
+
+```bash
+npm test
+```
+
+The suite uses the built-in Node test runner and needs no chain access. It covers
+the security score (`tests/wallet-manager.test.js`), amount parsing and guardrail
+enforcement (`tests/guardrails.test.js`), intent normalization
+(`tests/intent.test.js`), the HTTP auth and policy surface
+(`tests/server-auth.test.js`), and the pending-payment approval boundary
+(`tests/confirm-flow.test.js`). Each file runs in its own process against a
+temporary data directory, and RPC calls are served by a local JSON-RPC stub.
+
 ## Example Prompts
 
 - "Remember @alice is 0x742..."
@@ -132,6 +160,8 @@ http://localhost:5173
 - Server-side wallet storage is useful for prototyping custodial flows, but production systems should use HSM, MPC, account abstraction, or non-custodial signing models.
 - Natural-language UX reduces friction, but every generated action still needs visible review because blockchain transactions are irreversible.
 - LLM output must be treated as untrusted input and validated before it reaches transaction-building code.
+- The payment secret is a single shared approval factor, so it is only as strong as the user's memory. Production systems should move to per-transaction signing, time locks, and threshold policies.
+- `reset pin to <value>` sets the payment secret while `reset password to <value>` rotates the account credential. The phrasing difference is easy to misread and should become explicit settings in the UI.
 
 ## Roadmap
 
@@ -139,4 +169,5 @@ http://localhost:5173
 - Add ERC-4337 account abstraction for recovery, policies, and gas sponsorship.
 - Expand guardrails with time locks, approval thresholds, and multi-sig policies.
 - Add multi-chain support after the safety model is stable.
-- Add tests around intent parsing, guardrail enforcement, and transaction validation.
+- Replace the JSON file store with a transactional database.
+- Add coverage for the ENS resolution and voice input paths.

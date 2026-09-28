@@ -55,6 +55,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// Single generic message so failed auth cannot be used to probe account existence
+const INVALID_CREDENTIALS = 'Invalid credentials';
+
 // Rate limiting to prevent brute force
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -68,13 +71,15 @@ const chatLimiter = rateLimit({
   message: { success: false, message: 'Slow down! Too many messages.' }
 });
 
-const AUTH_SESSIONS_FILE = path.join(__dirname, 'data', 'auth-sessions.json');
+const DATA_DIR = process.env.INTENTPAY_DATA_DIR
+  ? path.resolve(process.env.INTENTPAY_DATA_DIR)
+  : path.join(__dirname, 'data');
+const AUTH_SESSIONS_FILE = path.join(DATA_DIR, 'auth-sessions.json');
 const authSessions = new Map();
 const AUTH_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 
 function ensureAuthSessionStorage() {
-  const dir = path.join(__dirname, 'data');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(AUTH_SESSIONS_FILE)) fs.writeFileSync(AUTH_SESSIONS_FILE, JSON.stringify({}), 'utf8');
 }
 
@@ -82,7 +87,20 @@ function loadAuthSessions() {
   ensureAuthSessionStorage();
   try {
     const raw = JSON.parse(fs.readFileSync(AUTH_SESSIONS_FILE, 'utf8'));
-    Object.entries(raw).forEach(([token, session]) => authSessions.set(token, session));
+    const now = Date.now();
+    let pruned = false;
+    Object.entries(raw).forEach(([token, session]) => {
+      const isUsable = session
+        && session.passwordSecret
+        && typeof session.expiresAt === 'number'
+        && session.expiresAt > now;
+      if (isUsable) {
+        authSessions.set(token, session);
+      } else {
+        pruned = true;
+      }
+    });
+    if (pruned) saveAuthSessions();
   } catch (e) {}
 }
 
@@ -97,7 +115,7 @@ function createAuthSession(userId, password) {
   const token = crypto.randomBytes(32).toString('hex');
   authSessions.set(token, {
     userId,
-    password,
+    passwordSecret: walletManager.sealSecret(password),
     authVersion: walletManager.getAuthVersion(userId),
     createdAt: Date.now(),
     expiresAt: Date.now() + AUTH_TTL_MS
@@ -124,7 +142,13 @@ function getSessionFromRequest(req) {
     saveAuthSessions();
     return null;
   }
-  return { token, ...session };
+  const password = walletManager.unsealSecret(session.passwordSecret);
+  if (!password) {
+    authSessions.delete(token);
+    saveAuthSessions();
+    return null;
+  }
+  return { token, ...session, password };
 }
 
 function revokeAuthSession(req) {
@@ -166,18 +190,22 @@ async function authenticateUser(req, res, next) {
   // Check if user exists
   const wallet = walletManager.getWallet(userId);
   if (!wallet) {
-    // If user doesn't exist, we allow it (for signup/first chat)
-    return next();
+    // Unknown users are only allowed through where the flow explicitly needs it,
+    // otherwise their existence could be probed without credentials.
+    if (req.allowUnknownUser === true) {
+      return next();
+    }
+    return res.status(401).json({ success: false, message: INVALID_CREDENTIALS });
   }
 
   // If user exists, they must provide a password
   if (!password) {
-    return res.status(401).json({ success: false, message: 'Password is required' });
+    return res.status(401).json({ success: false, message: INVALID_CREDENTIALS });
   }
 
   const isValid = await walletManager.verifyPassword(userId, password);
   if (!isValid) {
-    return res.status(401).json({ success: false, message: 'Invalid password' });
+    return res.status(401).json({ success: false, message: INVALID_CREDENTIALS });
   }
 
   req.authUserId = userId;
@@ -214,7 +242,7 @@ app.post('/api/login', authLimiter, async (req, res) => {
       const token = createAuthSession(userId, password);
       res.json({ success: true, token, userId, address: wallet.address });
     } else {
-      res.status(401).json({ success: false, message: 'Invalid credentials' });
+      res.status(401).json({ success: false, message: INVALID_CREDENTIALS });
     }
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -226,7 +254,10 @@ app.post('/api/login', authLimiter, async (req, res) => {
  */
 
 // Chat endpoint - process user messages and manage session state
-app.post('/api/chat', [authenticateUser, chatLimiter], async (req, res) => {
+app.post('/api/chat', (req, res, next) => {
+  req.allowUnknownUser = true;
+  next();
+}, [authenticateUser, chatLimiter], async (req, res) => {
   try {
     const { userId: bodyUserId, message, sessionId, mode, activeAddress } = req.body;
     const userId = req.authUserId || bodyUserId;
@@ -291,14 +322,27 @@ app.get('/api/wallet/:userId', authenticateUser, async (req, res) => {
   }
 });
 
-// Create a new wallet
-app.post('/api/wallet/:userId', async (req, res) => {
+// Wallet details. Accounts are created through /api/signup only.
+app.post('/api/wallet/:userId', [authLimiter, authenticateUser], async (req, res) => {
   try {
-    const { userId } = req.params;
-    const { password } = req.body;
-    const result = await walletManager.createWallet(userId, password);
+    const userId = req.params.userId;
+    if (!req.authUserId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required. Use /api/signup to create a new account.'
+      });
+    }
+    const result = await walletManager.createWallet(userId, req.authPassword || req.body.password);
 
-    res.json(result);
+    if (!result.success && /already exists/i.test(result.message || '')) {
+      return res.json({ success: true, address: result.address, created: false });
+    }
+
+    if (!result.success) {
+      return res.status(400).json({ success: false, message: result.message });
+    }
+
+    return res.status(201).json({ ...result, created: true });
   } catch (error) {
     console.error('Error creating wallet:', error);
     res.status(500).json({
@@ -314,7 +358,7 @@ app.post('/api/transaction/:userId', authenticateUser, async (req, res) => {
     const userId = req.authUserId || req.params.userId;
     const { recipient, amount } = req.body;
 
-    if (!recipient || !amount) {
+    if (!recipient || amount === undefined || amount === null || amount === '') {
       return res.status(400).json({
         success: false,
         message: 'Both recipient and amount are required'
@@ -329,12 +373,21 @@ app.post('/api/transaction/:userId', authenticateUser, async (req, res) => {
       });
     }
 
-    // Validate amount
-    const amountFloat = parseFloat(amount);
-    if (isNaN(amountFloat) || amountFloat <= 0) {
+    // Validate amount as exact wei
+    const amountWei = walletManager.toWeiAmount(amount);
+    if (amountWei === null) {
       return res.status(400).json({
         success: false,
-        message: 'Amount must be a positive number'
+        message: 'Amount must be a positive number of ETH no greater than 1000'
+      });
+    }
+    const amountEth = walletManager.formatEthAmount(amountWei);
+
+    // Recipient policy
+    if (!walletManager.isAddressWhitelisted(userId, recipient)) {
+      return res.status(400).json({
+        success: false,
+        message: `Recipient ${recipient} is not on your whitelist. Update your whitelist before sending to this address.`
       });
     }
 
@@ -350,49 +403,53 @@ app.post('/api/transaction/:userId', authenticateUser, async (req, res) => {
     }
 
     // Check balance
-    const balance = await walletInstance.getBalance();
-    const amountWei = ethers.parseEther(amount.toString());
-
-    if (balance.lt(amountWei)) {
+    const balance = await provider.getBalance(walletInstance.address);
+    if (balance < amountWei) {
       return res.status(400).json({
         success: false,
-        message: `Insufficient balance. You have ${ethers.formatEther(balance)} ETH, trying to send ${amount} ETH`
+        message: `Insufficient balance. You have ${ethers.formatEther(balance)} ETH, trying to send ${amountEth} ETH`
       });
     }
 
-    // Check Guardrails (Daily Limit)
-    const allowed = walletManager.checkAndUpdateLimit(userId, amount);
-    if (!allowed) {
+    // Reserve against the daily limit before broadcasting
+    const reservation = walletManager.reserveDailySpend(userId, amountEth);
+    if (!reservation.ok) {
       return res.status(400).json({
         success: false,
-        message: 'Daily limit exceeded'
+        message: reservation.reason
       });
     }
 
-    // Send transaction
-    const tx = await walletInstance.sendTransaction({
-      to: recipient,
-      value: amountWei,
-      gasLimit: 21000 // Standard gas limit for ETH transfers
-    });
+    try {
+      // Send transaction
+      const tx = await walletInstance.sendTransaction({
+        to: recipient,
+        value: amountWei,
+        gasLimit: 21000 // Standard gas limit for ETH transfers
+      });
 
-    // Record transaction
-    walletManager.recordTransaction(userId, {
-      type: 'send',
-      to: recipient,
-      amount: amount,
-      hash: tx.hash,
-      status: 'success',
-      mode: 'custodial'
-    });
+      // Record transaction
+      walletManager.recordTransaction(userId, {
+        type: 'send',
+        to: recipient,
+        amount: amountEth,
+        hash: tx.hash,
+        status: 'success',
+        mode: 'custodial'
+      });
 
-    res.json({
-      success: true,
-      txHash: tx.hash,
-      from: walletInstance.address,
-      to: recipient,
-      amount
-    });
+      res.json({
+        success: true,
+        txHash: tx.hash,
+        from: walletInstance.address,
+        to: recipient,
+        amount: amountEth
+      });
+    } catch (sendError) {
+      walletManager.releaseDailySpend(userId, amountEth);
+      walletManager.logSecurityEvent(userId, 'Transaction Send Failed', 'medium');
+      throw sendError;
+    }
   } catch (error) {
     console.error('Error sending transaction:', error);
     res.status(500).json({
@@ -432,9 +489,15 @@ app.get('/api/history/:userId', authenticateUser, async (req, res) => {
 // Record a transaction (useful for non-custodial mode)
 app.post('/api/record-tx', authenticateUser, async (req, res) => {
   try {
-    const userId = req.authUserId || req.body.userId;
+    const userId = req.authUserId;
     const { tx } = req.body;
-    walletManager.recordTransaction(userId, tx);
+    if (!tx || typeof tx !== 'object') {
+      return res.status(400).json({ success: false, message: 'A transaction payload is required' });
+    }
+    const recorded = walletManager.recordTransaction(userId, tx);
+    if (!recorded) {
+      return res.status(400).json({ success: false, message: 'Transaction payload was rejected as invalid' });
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -546,8 +609,17 @@ app.get('/', (req, res) => {
 
 // Start the server
 loadAuthSessions();
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`RPC URL: ${process.env.RPC_URL.substring(0, 20)}...`);
-  console.log(`Visit http://localhost:${PORT} to view the API documentation`);
-}); 
+
+function startServer() {
+  return app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`RPC URL: ${(process.env.RPC_URL || '').substring(0, 20)}...`);
+    console.log(`Visit http://localhost:${PORT} to view the API documentation`);
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, startServer };
