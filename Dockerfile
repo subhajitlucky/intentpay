@@ -6,7 +6,7 @@
 # Stage 3 is the runtime: non-root, with /app/data ready for a mounted volume.
 
 # ---- 1. build the client ---------------------------------------------------
-FROM node:20-bookworm-slim AS client
+FROM node:22-bookworm-slim AS client
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -15,13 +15,13 @@ ENV VITE_API_BASE=/api
 RUN npm run build
 
 # ---- 2. production dependencies -------------------------------------------
-FROM node:20-bookworm-slim AS deps
+FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ---- 3. runtime ------------------------------------------------------------
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     PORT=3000 \
     INTENTPAY_DATA_DIR=/app/data

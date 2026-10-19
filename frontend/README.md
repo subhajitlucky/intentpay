@@ -3,6 +3,9 @@
 The React client for IntentPay. It talks to the Express API in the repository
 root; it has no server logic of its own.
 
+Requires **Node 22 or newer**: the test environment (jsdom 30) depends on a Node
+API that does not exist in Node 20.
+
 ```bash
 npm install
 npm run dev     # http://localhost:5173

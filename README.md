@@ -213,7 +213,8 @@ enforcement (`tests/guardrails.test.js`), intent normalization
 (`tests/confirm-flow.test.js`). Each file runs in its own process against a
 temporary data directory, and RPC calls are served by a local JSON-RPC stub.
 
-Voice mode has its own frontend suite:
+Voice mode has its own frontend suite (needs Node 22 or newer — jsdom 30 pulls
+in an undici that will not load on Node 20):
 
 ```bash
 cd frontend
