@@ -537,8 +537,25 @@ app.get('/api/health', (req, res) => {
   res.json({ success: true, status: 'IntentPay is active' });
 });
 
+/**
+ * The client is a separate Vite app, so a deployment is either:
+ *   - two services: this API plus the static build (set CORS_ORIGINS), or
+ *   - one service: this API also serving `frontend/dist` (one origin, no CORS).
+ * The built client is used whenever it exists; otherwise the API documentation
+ * page stays at `/`, which is what you want when running the API on its own.
+ */
+const CLIENT_DIR = path.join(__dirname, 'frontend', 'dist');
+const hasClientBuild = fs.existsSync(path.join(CLIENT_DIR, 'index.html'));
+
+if (hasClientBuild) {
+  app.use(express.static(CLIENT_DIR, { index: false, maxAge: '1h' }));
+}
+
 // Serve a simple home page
 app.get('/', (req, res) => {
+  if (hasClientBuild) {
+    return res.sendFile(path.join(CLIENT_DIR, 'index.html'));
+  }
   res.send(`
     <html>
       <head>
@@ -614,7 +631,9 @@ function startServer() {
   return app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`RPC URL: ${(process.env.RPC_URL || '').substring(0, 20)}...`);
-    console.log(`Visit http://localhost:${PORT} to view the API documentation`);
+    console.log(hasClientBuild
+      ? `Serving the built client from frontend/dist on http://localhost:${PORT}`
+      : `Visit http://localhost:${PORT} to view the API documentation (no client build found)`);
   });
 }
 

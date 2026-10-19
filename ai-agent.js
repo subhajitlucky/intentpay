@@ -184,11 +184,24 @@ function resolveSenderAddress(wallet, mode, activeAddress) {
 }
 
 /**
+ * Placeholders shipped in `.env.example` must count as "no key at all". Otherwise
+ * the first request goes upstream with a bogus key and the user sees a generic
+ * upstream failure instead of being told what to fix.
+ */
+function isPlaceholderApiKey(key) {
+  if (!key) return true;
+  const trimmed = String(key).trim();
+  return /^your[_-]/i.test(trimmed)
+    || /^sk-or-v1-your/i.test(trimmed)
+    || /^(changeme|placeholder|test)$/i.test(trimmed);
+}
+
+/**
  * Call OpenRouter LLM
  */
 async function callLLM(userId, message, session, mode = 'custodial', activeAddress = null) {
   try {
-    if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY === 'your_openrouter_key_here') {
+    if (isPlaceholderApiKey(OPENROUTER_API_KEY)) {
       return { action: 'error', message: "API Key Missing: Please add your OPENROUTER_API_KEY to the .env file to enable the Intelligence upgrade." };
     }
 

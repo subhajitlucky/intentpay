@@ -1,0 +1,19 @@
+# Build context hygiene: never ship local state, secrets or installed trees.
+
+node_modules
+frontend/node_modules
+frontend/dist
+
+# The keystore and the encryption key must never be baked into an image.
+data
+.env
+*.pem
+
+.git
+.gitignore
+.github
+tests
+
+*.md
+frontend/README.md
+.playwright-cli
