@@ -51,6 +51,9 @@ function rms(samples) {
   return Math.sqrt(sum / samples.length);
 }
 
+// Level above which a frame counts as someone talking rather than room tone.
+export const VOICE_ACTIVITY_RMS = 0.015;
+
 export function sanitizeVoiceTranscript(text) {
   if (typeof text !== 'string') return '';
   return text.trim();
@@ -65,12 +68,27 @@ export class IntentVoiceEngine {
     this.sink = null;
     this.chunks = [];
     this.sampleRate = null;
+    this.silenceTimeoutMs = 0;
+    this.onSilence = null;
+    this.hasSpoken = false;
+    this.lastVoiceAt = null;
   }
 
-  async start() {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.silenceTimeoutMs] Auto-stop after this much silence
+   *   once speech has been detected. This is what lets the Whisper fallback work
+   *   without a second tap on the mic.
+   * @param {Function} [options.onSilence] Called once when that silence is reached.
+   */
+  async start({ silenceTimeoutMs = 0, onSilence = null } = {}) {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     this.audioContext = new AudioContextCtor({ latencyHint: 'interactive' });
     this.sampleRate = this.audioContext.sampleRate;
+    this.silenceTimeoutMs = silenceTimeoutMs;
+    this.onSilence = onSilence;
+    this.hasSpoken = false;
+    this.lastVoiceAt = null;
 
     this.mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -90,11 +108,31 @@ export class IntentVoiceEngine {
     this.processor.onaudioprocess = (event) => {
       const mono = event.inputBuffer.getChannelData(0);
       this.chunks.push(new Float32Array(mono));
+      this.trackSilence(mono);
     };
 
     this.source.connect(this.processor);
     this.processor.connect(this.sink);
     this.sink.connect(this.audioContext.destination);
+  }
+
+  trackSilence(mono) {
+    if (!this.silenceTimeoutMs) return;
+
+    const now = Date.now();
+    if (rms(mono) >= VOICE_ACTIVITY_RMS) {
+      this.hasSpoken = true;
+      this.lastVoiceAt = now;
+      return;
+    }
+
+    if (!this.hasSpoken || !this.lastVoiceAt) return;
+    if (now - this.lastVoiceAt < this.silenceTimeoutMs) return;
+
+    // Fire exactly once; a later call would re-trigger while the caller stops.
+    this.hasSpoken = false;
+    this.lastVoiceAt = null;
+    if (typeof this.onSilence === 'function') this.onSilence();
   }
 
   async stopAndTranscribe() {

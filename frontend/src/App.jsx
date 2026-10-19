@@ -1,35 +1,48 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
-  Wallet,
-  Send,
-  History,
-  MessageSquare,
-  User,
-  ArrowUpRight,
+  AlertTriangle,
   ArrowDownLeft,
+  ArrowUpRight,
+  Check,
   Copy,
-  CheckCircle2,
   Cpu,
+  Ear,
   LogOut,
-  Sparkles,
-  Lock,
+  Mic,
+  MicOff,
+  Radio,
   RefreshCw,
-  ShieldCheck,
+  ScrollText,
+  Send,
   ShieldAlert,
+  ShieldCheck,
+  Trash2,
   Users,
   Volume2,
   VolumeX,
-  Mic,
-  MicOff
+  Wallet
 } from 'lucide-react';
 import axios from 'axios';
 import { ethers } from 'ethers';
 import { API_BASE } from './config/api';
+import { redactSensitiveContent, sanitizeMessagesForStorage } from './lib/redaction';
+import {
+  VOICE_STATES,
+  WAKE_WORD_LABEL,
+  VoiceModeEngine,
+  matchVoiceCommand,
+  matchWakeWord,
+  sanitizeForSpeech
+} from './lib/voice-mode';
+import VoiceConsole from './components/VoiceConsole';
+import TransactionLedger from './components/TransactionLedger';
+import BrandGlyph from './components/BrandGlyph';
 import './App.css';
 
 const SEPOLIA_CHAIN_ID = '0xaa36a7'; // 11155111
 const CHAT_HISTORY_PREFIX = 'onchain_chat_history_';
 const MAX_STORED_MESSAGES = 200;
+const FALLBACK_SILENCE_MS = 1400;
 
 function extractResetSecret(message) {
   if (!message || typeof message !== 'string') return '';
@@ -46,43 +59,6 @@ function getDefaultGreeting(name = '') {
 
 function getChatStorageKey(userId) {
   return `${CHAT_HISTORY_PREFIX}${userId || 'anonymous'}`;
-}
-
-function redactSensitiveContent(content) {
-  if (typeof content !== 'string') return content;
-  const trimmed = content.trim();
-
-  if (/^(?:confirm|yes|proceed)\s+.+/i.test(trimmed)) {
-    const cmd = trimmed.split(/\s+/)[0];
-    return `${cmd} [REDACTED]`;
-  }
-
-  if (/^(?:set|change|reset)\s+(?:payment\s+)?(?:pin|password|secret|secret\s+word)\s+(?:to\s+)?/i.test(trimmed)) {
-    return trimmed.replace(
-      /^(.*?\b(?:to)\b\s*).+$/i,
-      '$1[REDACTED]'
-    ).replace(
-      /^(.*?\b(?:pin|password|secret|secret\s+word)\b\s*).+$/i,
-      '$1[REDACTED]'
-    );
-  }
-
-  if (/^(?:reset|change)\s+(?:pin|password)\s+(?:to\s+)?/i.test(trimmed)) {
-    return trimmed.replace(/^(.*?\b(?:to)\b\s*).+$/i, '$1[REDACTED]');
-  }
-
-  if (/(seed phrase|private key)/i.test(trimmed)) {
-    return trimmed.replace(/(seed phrase|private key)(\s*[:=]?\s*).+/i, '$1$2[REDACTED]');
-  }
-
-  return content;
-}
-
-function sanitizeMessagesForStorage(messages) {
-  return messages.map((m) => ({
-    role: m.role,
-    content: redactSensitiveContent(m.content)
-  }));
 }
 
 function App() {
@@ -110,11 +86,29 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const [voiceHintDismissed, setVoiceHintDismissed] = useState(false);
 
+  // Voice mode: hands-free wake-word control with spoken replies.
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [voiceState, setVoiceState] = useState(VOICE_STATES.OFF);
+  const [voiceTranscript, setVoiceTranscript] = useState(null);
+  const [voiceLog, setVoiceLog] = useState([]);
+  const [voiceError, setVoiceError] = useState('');
+  const [voiceHint, setVoiceHint] = useState('');
+  const [showVoiceHelp, setShowVoiceHelp] = useState(false);
+  const [fallbackListening, setFallbackListening] = useState(false);
+  const [receiveHint, setReceiveHint] = useState('');
+
   const chatEndRef = useRef(null);
+  const chatInputRef = useRef(null);
   const spokenMessageCountRef = useRef(0);
   const speechRecognitionRef = useRef(null);
   const speechDraftRef = useRef('');
   const voiceEngineRef = useRef(null);
+  const voiceModeEngineRef = useRef(null);
+  const voiceModeRef = useRef(false);
+  const voiceCommandRef = useRef(null);
+  const lastAiMessageRef = useRef('');
+  const voiceLogIdRef = useRef(0);
+  const fallbackStoppingRef = useRef(false);
   const refreshInFlightRef = useRef(false);
   const sessionCheckedRef = useRef(false);
 
@@ -132,20 +126,53 @@ function App() {
     && !!navigator.mediaDevices?.getUserMedia
     && !!(window.AudioContext || window.webkitAudioContext);
   const canUseSpeechToText = canUseNativeSpeechToText || canUseWhisperSpeechToText;
+  // Wake-word mode needs continuous recognition. Whisper cannot run in real time,
+  // so it is offered as a one-command fallback instead of pretending otherwise.
+  const wakeWordSupported = VoiceModeEngine.isSupported();
+  const voiceModeAvailable = wakeWordSupported || canUseWhisperSpeechToText;
 
   const stopSpeaking = useCallback(() => {
+    const engine = voiceModeEngineRef.current;
+    if (engine?.running) {
+      engine.stopSpeaking();
+      return;
+    }
     if (!canUseSpeech) return;
     window.speechSynthesis.cancel();
   }, [canUseSpeech]);
 
   const speakText = useCallback((text) => {
-    if (!canUseSpeech || !text) return;
-    const utterance = new SpeechSynthesisUtterance(String(text));
+    if (!text) return;
+    // In voice mode the engine owns speech so that "stop" can interrupt it and
+    // the microphone is only released when the answer finishes.
+    const engine = voiceModeEngineRef.current;
+    if (engine?.running) {
+      engine.speak(text);
+      return;
+    }
+    if (!canUseSpeech) return;
+    const utterance = new SpeechSynthesisUtterance(sanitizeForSpeech(text) || String(text));
     utterance.rate = 1;
     utterance.pitch = 1;
     stopSpeaking();
     window.speechSynthesis.speak(utterance);
   }, [canUseSpeech, stopSpeaking]);
+
+  const pushVoiceLog = useCallback((kind, text) => {
+    voiceLogIdRef.current += 1;
+    const entry = { id: voiceLogIdRef.current, kind, text, at: new Date().toISOString() };
+    setVoiceLog((prev) => [entry, ...prev].slice(0, 8));
+  }, []);
+
+  const speakReply = useCallback((text) => {
+    const clean = typeof text === 'string' ? text : '';
+    if (clean.trim()) lastAiMessageRef.current = clean;
+    if (!voiceModeRef.current) return;
+    const engine = voiceModeEngineRef.current;
+    if (!engine?.running) return;
+    pushVoiceLog('reply', sanitizeForSpeech(clean).slice(0, 90));
+    engine.speak(clean);
+  }, [pushVoiceLog]);
 
   const clearAuthAndReturnToLogin = useCallback((message = '') => {
     sessionCheckedRef.current = false;
@@ -243,6 +270,13 @@ function App() {
     }
   }, []);
 
+  // Landing on a stale zero balance makes a console feel broken, so the dashboard
+  // loads itself once a session exists instead of waiting for a manual refresh.
+  useEffect(() => {
+    if (!isLoggedIn || !userId || !authToken) return;
+    refreshDashboard();
+  }, [isLoggedIn, userId, authToken, refreshDashboard]);
+
   useEffect(() => {
     if (!isLoggedIn || !userId || !authToken || sessionCheckedRef.current) return;
 
@@ -293,6 +327,12 @@ function App() {
   }, [messages, loading]);
 
   useEffect(() => {
+    if (voiceMode) {
+      // Voice mode speaks every reply through the engine; the playback toggle
+      // only drives typed chat.
+      spokenMessageCountRef.current = messages.length;
+      return;
+    }
     if (!voiceEnabled || !canUseSpeech) {
       spokenMessageCountRef.current = messages.length;
       return;
@@ -303,9 +343,12 @@ function App() {
     const latestAi = [...incoming].reverse().find(
       (m) => m.role === 'ai' && typeof m.content === 'string' && m.content.trim() && !m.content.startsWith('*Thinking:')
     );
-    if (latestAi) speakText(latestAi.content);
+    if (latestAi) {
+      lastAiMessageRef.current = latestAi.content;
+      speakText(latestAi.content);
+    }
     spokenMessageCountRef.current = messages.length;
-  }, [messages, voiceEnabled, canUseSpeech, speakText]);
+  }, [messages, voiceEnabled, voiceMode, canUseSpeech, speakText]);
 
   useEffect(() => {
     return () => stopSpeaking();
@@ -327,6 +370,14 @@ function App() {
       if (voiceEngineRef.current) {
         try {
           voiceEngineRef.current.stopAndTranscribe();
+        } catch {
+          // no-op during unmount cleanup
+        }
+      }
+
+      if (voiceModeEngineRef.current) {
+        try {
+          voiceModeEngineRef.current.stop();
         } catch {
           // no-op during unmount cleanup
         }
@@ -373,11 +424,15 @@ function App() {
     setMessages([{ role: 'ai', content: getDefaultGreeting(userId) }]);
   };
 
-  const submitUserMessage = async (rawMessage) => {
+  const submitUserMessage = async (rawMessage, { speak = false } = {}) => {
     if (!rawMessage || !String(rawMessage).trim()) return;
     const userMsg = String(rawMessage).trim();
+    // The raw text is what the server needs (it may carry an approval secret), but
+    // the on-screen copy is redacted so a spoken secret never lands in the DOM.
+    const displayMsg = redactSensitiveContent(userMsg);
+    let replyText = '';
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setMessages(prev => [...prev, { role: 'user', content: displayMsg }]);
     setLoading(true);
 
     try {
@@ -392,6 +447,7 @@ function App() {
         setMessages(prev => [...prev, { role: 'ai', content: `*Thinking: ${resp.data.thought}*` }]);
       }
       setMessages(prev => [...prev, { role: 'ai', content: resp.data.message }]);
+      replyText = resp.data.message || '';
 
       const passwordWasUpdated = !!resp.data.passwordUpdated;
       if (passwordWasUpdated) {
@@ -414,15 +470,18 @@ function App() {
     } catch (err) {
       const serverMsg = err.response?.data?.message;
       if (err.response?.status === 401) {
+        replyText = 'Session expired. Please log in again.';
         clearAuthAndReturnToLogin('Session expired. Please log in again.');
         return;
       }
       const fallback = err.response?.status === 401
         ? "Authentication error. Try logging in again."
         : "Request failed. Please try again.";
-      setMessages(prev => [...prev, { role: 'ai', content: serverMsg || fallback }]);
+      replyText = serverMsg || fallback;
+      setMessages(prev => [...prev, { role: 'ai', content: replyText }]);
     } finally {
       setLoading(false);
+      if (speak) speakReply(replyText);
     }
   };
 
@@ -430,6 +489,208 @@ function App() {
     e.preventDefault();
     await submitUserMessage(input);
   };
+
+  // -------------------------------------------------------------------------
+  // Voice mode
+  // -------------------------------------------------------------------------
+
+  /**
+   * Run a recognised command. Everything that can change wallet state is handed
+   * to the same chat endpoint that typed input uses, so voice mode adds a
+   * microphone, never a second execution path.
+   */
+  const handleVoiceCommand = async (command) => {
+    if (!command) return;
+    const engine = voiceModeEngineRef.current;
+    const release = () => engine?.setBusy(false);
+
+    switch (command.type) {
+      case 'stop_speaking':
+        engine?.stopSpeaking();
+        release();
+        return;
+
+      case 'repeat': {
+        const previous = lastAiMessageRef.current;
+        if (previous) {
+          if (engine?.running) engine.speak(previous);
+          else speakText(previous);
+        } else if (engine?.running) {
+          engine.speak('There is nothing to repeat yet.');
+        }
+        return;
+      }
+
+      case 'help':
+        setShowVoiceHelp(true);
+        if (engine?.running) {
+          engine.speak('You can ask for your balance, send ETH to a contact, confirm a payment with your code, or cancel a staged payment. Say stop at any time.');
+        } else {
+          release();
+        }
+        return;
+
+      case 'cancel_payment':
+        await submitUserMessage('intentpay cancel', { speak: true });
+        return;
+
+      case 'confirm_payment':
+        // The canonical phrase goes to the server; the console only ever shows
+        // the redacted form.
+        pushVoiceLog('dispatched', redactSensitiveContent(command.message));
+        await submitUserMessage(command.message, { speak: true });
+        return;
+
+      default:
+        await submitUserMessage(command.message, { speak: true });
+    }
+  };
+
+  const stopVoiceMode = () => {
+    voiceModeRef.current = false;
+    setVoiceMode(false);
+    setVoiceState(VOICE_STATES.OFF);
+    setVoiceTranscript(null);
+    setVoiceHint('');
+    setVoiceError('');
+    setFallbackListening(false);
+    const engine = voiceModeEngineRef.current;
+    if (engine) engine.stop();
+  };
+
+  const startVoiceMode = async () => {
+    setVoiceError('');
+    setVoiceHint('');
+    setShowVoiceHelp(false);
+
+    if (!wakeWordSupported) {
+      setVoiceError('Wake-word voice mode needs Chrome or Edge. Use the tap-to-speak button below instead.');
+      setVoiceMode(true);
+      setVoiceState(VOICE_STATES.ERROR);
+      return;
+    }
+
+    if (!voiceModeEngineRef.current) {
+      voiceModeEngineRef.current = new VoiceModeEngine({
+        onStateChange: setVoiceState,
+        onError: (message) => setVoiceError(message),
+        onSpeechEnd: () => voiceModeEngineRef.current?.setBusy(false),
+        onCommand: (command) => {
+          // A thrown handler must never wedge voice mode in the busy state.
+          const release = (message) => {
+            if (message) setVoiceError(message);
+            voiceModeEngineRef.current?.setBusy(false);
+          };
+          try {
+            const pending = voiceCommandRef.current?.(command);
+            if (pending && typeof pending.catch === 'function') {
+              pending.catch((err) => release(`Voice command failed: ${err.message}`));
+            }
+          } catch (err) {
+            release(`Voice command failed: ${err.message}`);
+          }
+        },
+        onTranscript: ({ text, kind, final }) => {
+          if (kind === 'wake') {
+            setVoiceTranscript(null);
+            setVoiceHint('Go ahead, I am listening.');
+            return;
+          }
+          if (kind === 'timeout') {
+            setVoiceHint('I did not catch a command. Say the wake word again.');
+            return;
+          }
+          if (!text) return;
+
+          const safe = redactSensitiveContent(text);
+          setVoiceTranscript({ text: safe, kind, final });
+          // Ambient speech is shown so the user can see the mic working, but it is
+          // deliberately kept out of the log to avoid noise.
+          if (kind !== 'ambient') pushVoiceLog(kind, safe);
+        }
+      });
+    }
+
+    voiceModeRef.current = true;
+    try {
+      await voiceModeEngineRef.current.start();
+      setVoiceMode(true);
+      setVoiceHint(`Voice mode is live. Say “${WAKE_WORD_LABEL}” and your command.`);
+    } catch (err) {
+      voiceModeRef.current = false;
+      setVoiceError(err.message);
+      setVoiceState(VOICE_STATES.ERROR);
+      setVoiceMode(true);
+    }
+  };
+
+  const toggleVoiceMode = () => {
+    if (voiceMode) stopVoiceMode();
+    else startVoiceMode();
+  };
+
+  const stopFallbackRecording = async () => {
+    if (fallbackStoppingRef.current) return;
+    const engine = voiceEngineRef.current;
+    setFallbackListening(false);
+    if (!engine) return;
+
+    fallbackStoppingRef.current = true;
+    setVoiceHint('Transcribing...');
+    try {
+      const text = await engine.stopAndTranscribe();
+      if (!text) {
+        setVoiceHint('I did not catch that. Try again.');
+        setVoiceState(VOICE_STATES.WAKE);
+        return;
+      }
+
+      // The tap replaced the wake word, so accept the whole utterance.
+      const wake = matchWakeWord(text);
+      const spoken = (wake?.command || text).trim();
+      const safe = redactSensitiveContent(spoken);
+      setVoiceTranscript({ text: safe, kind: 'command', final: true });
+      pushVoiceLog('command', safe);
+      await handleVoiceCommand(matchVoiceCommand(spoken));
+    } catch (err) {
+      setVoiceError(`Transcription failed: ${err.message}`);
+      setVoiceState(VOICE_STATES.WAKE);
+    } finally {
+      fallbackStoppingRef.current = false;
+    }
+  };
+
+  const toggleFallbackRecording = async () => {
+    if (fallbackListening) {
+      await stopFallbackRecording();
+      return;
+    }
+
+    setVoiceError('');
+    try {
+      if (!voiceEngineRef.current) {
+        const { IntentVoiceEngine } = await import('./lib/intent-voice');
+        voiceEngineRef.current = new IntentVoiceEngine();
+      }
+      setFallbackListening(true);
+      setVoiceState(VOICE_STATES.CAPTURING);
+      setVoiceHint('Speak your command. Recording stops when you pause.');
+      await voiceEngineRef.current.start({
+        silenceTimeoutMs: FALLBACK_SILENCE_MS,
+        onSilence: () => { stopFallbackRecording(); }
+      });
+    } catch (err) {
+      setFallbackListening(false);
+      setVoiceState(VOICE_STATES.ERROR);
+      setVoiceError(`Could not start the microphone: ${err.message}`);
+    }
+  };
+
+  // The engine captures its callbacks at construction, so it always calls the
+  // latest handler instead of a stale first render.
+  useEffect(() => {
+    voiceCommandRef.current = handleVoiceCommand;
+  });
 
   const startWhisperSpeechToText = async () => {
     try {
@@ -553,9 +814,33 @@ function App() {
   };
 
   const copyToClipboard = () => {
-    navigator.clipboard.writeText(wallet?.address);
+    const address = wallet?.address;
+    if (!address) return false;
+    try {
+      // undefined on insecure origins, which is why this is not assumed.
+      navigator.clipboard?.writeText(address);
+    } catch {
+      // Clipboard access is a convenience, never a requirement.
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+    return true;
+  };
+
+  // "Send" and "Receive" hand the user to the assistant instead of pretending to
+  // be a transfer form: every transfer in this app is conversational by design.
+  const startTransferIntent = () => {
+    setInput('send 0.01 ETH to ');
+    chatInputRef.current?.focus();
+  };
+
+  const handleReceive = () => {
+    if (!copyToClipboard()) {
+      setReceiveHint('No wallet yet');
+    } else {
+      setReceiveHint('Address copied');
+    }
+    setTimeout(() => setReceiveHint(''), 2400);
   };
 
   const connectMetaMask = async () => {
@@ -698,327 +983,562 @@ function App() {
     }
   };
 
+  const shortAddress = (value) => {
+    const text = String(value || '');
+    if (!text) return '—';
+    return text.length <= 14 ? text : `${text.slice(0, 6)}…${text.slice(-4)}`;
+  };
+
+  const custodyTone = securityStatus.score > 80
+    ? 'is-secure'
+    : securityStatus.score > 50 ? 'is-warning' : 'is-critical';
+
+  const activeAddress = mode === 'non-custodial' && mmAddress ? mmAddress : wallet?.address;
+  const contactEntries = wallet?.contacts ? Object.entries(wallet.contacts) : [];
+  const recentLogs = securityStatus.recentLogs || [];
+
   if (!isLoggedIn) {
     return (
-      <div className="auth-container">
-        <div
-          className="glass-card"
-          style={{ width: '400px' }}
-        >
-          <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-            <div className="btn" style={{ width: '64px', height: '64px', margin: '0 auto 16px', borderRadius: '20px' }}>
-              <Lock size={32} />
-            </div>
-            <h1 style={{ fontSize: '24px', fontWeight: '800' }}>IntentPay</h1>
-            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>Secure Wallet Access</p>
-          </div>
+      <div className="app-shell">
+        <div className="auth">
+          <div className="auth__card reveal">
+            <aside className="auth__aside">
+              <div className="topbar__brand">
+                <span className="brandmark__glyph">
+                  <BrandGlyph size={18} />
+                </span>
+                <span className="brandmark__text">
+                  <span className="brandmark__name">IntentPay</span>
+                  <span className="brandmark__tagline">Secure wallet protocol</span>
+                </span>
+              </div>
 
-          <form onSubmit={handleAuth}>
-            <label htmlFor="auth-username" style={{ display: 'block', marginBottom: '8px', fontSize: '14px', fontWeight: '600' }}>Username</label>
-            <input
-              id="auth-username"
-              type="text"
-              className="input-field"
-              placeholder="Username"
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              required
-            />
-            <label htmlFor="auth-password" style={{ display: 'block', marginBottom: '8px', fontSize: '14px', fontWeight: '600' }}>Password</label>
-            <input
-              id="auth-password"
-              type="password"
-              className="input-field"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-            {error && <p style={{ color: '#ef4444', fontSize: '12px', marginBottom: '16px' }}>{error}</p>}
-            <button type="submit" className="btn" style={{ width: '100%', marginTop: '8px' }}>
-              {isSignup ? 'Create Account' : 'Login'}
-            </button>
-          </form>
-          <p style={{ textAlign: 'center', marginTop: '16px', fontSize: '14px', color: 'var(--text-muted)' }}>
-            {isSignup ? 'Already have a wallet?' : 'Need a new wallet?'}
-            <span
-              onClick={() => setIsSignup(!isSignup)}
-              style={{ color: 'var(--primary)', cursor: 'pointer', marginLeft: '8px', fontWeight: '600' }}
-            >
-              {isSignup ? 'Login' : 'Sign Up'}
-            </span>
-          </p>
+              <h1 className="auth__aside-title">
+                The model proposes.
+                <br />
+                <em>You approve.</em>
+              </h1>
+
+              <p className="auth__aside-lead">
+                IntentPay turns a sentence into a prepared Ethereum transaction, then stops
+                at the wallet boundary and waits for you.
+              </p>
+
+              <div className="auth__rule" />
+
+              <ul className="review-points">
+                <li className="review-point">
+                  <span className="review-point__index">01</span>
+                  <span className="review-point__text">
+                    <strong>Nothing signs itself.</strong> Every transfer is staged, priced and
+                    reviewed before it is broadcast.
+                  </span>
+                </li>
+                <li className="review-point">
+                  <span className="review-point__index">02</span>
+                  <span className="review-point__text">
+                    <strong>Guardrails are re-checked at execution.</strong> Limits, whitelists and
+                    balances are verified again after approval.
+                  </span>
+                </li>
+                <li className="review-point">
+                  <span className="review-point__index">03</span>
+                  <span className="review-point__text">
+                    <strong>Secrets stay local.</strong> Your approval code never reaches the model,
+                    and keys are encrypted at rest.
+                  </span>
+                </li>
+              </ul>
+            </aside>
+
+            <div className="auth__form">
+              <h2 className="auth__title">{isSignup ? 'Create a wallet' : 'Sign in'}</h2>
+              <p className="auth__sub">
+                {isSignup
+                  ? 'A keypair and an encrypted keystore are generated for this account.'
+                  : 'Enter your credentials to open the console.'}
+              </p>
+
+              <form onSubmit={handleAuth}>
+                <div className="field">
+                  <label className="field__label" htmlFor="auth-username">Account</label>
+                  <input
+                    id="auth-username"
+                    type="text"
+                    className="field__input"
+                    placeholder="your-handle"
+                    autoComplete="username"
+                    spellCheck="false"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div className="field">
+                  <label className="field__label" htmlFor="auth-password">Passphrase</label>
+                  <input
+                    id="auth-password"
+                    type="password"
+                    className="field__input"
+                    placeholder="••••••••••"
+                    autoComplete={isSignup ? 'new-password' : 'current-password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                  />
+                </div>
+
+                {error && (
+                  <p className="form-error" role="alert">
+                    <AlertTriangle size={14} />
+                    {error}
+                  </p>
+                )}
+
+                <button type="submit" className="btn btn--primary btn--block">
+                  {isSignup ? 'Create wallet' : 'Open console'}
+                </button>
+              </form>
+
+              <p className="auth__switch">
+                {isSignup ? 'Already holding a wallet?' : 'No wallet yet?'}
+                <button
+                  type="button"
+                  className="auth__switch-btn"
+                  onClick={() => setIsSignup(!isSignup)}
+                >
+                  {isSignup ? 'Sign in' : 'Create one'}
+                </button>
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="dashboard">
-      <header className="dashboard-header">
-        <div className="dashboard-title">
-          <div className="brand-chip">IntentPay</div>
-          <h2 style={{ fontSize: '14px', color: 'var(--text-muted)' }}>Secure Wallet of</h2>
-          <h1 style={{ fontSize: '20px', fontWeight: '700' }}>{userId}</h1>
-        </div>
-        <div className="dashboard-actions">
-          <button 
-            onClick={connectMetaMask} 
-            className={`btn header-action connect-btn ${mmAddress ? 'connected' : ''}`}
-          >
-            <Wallet size={16} />
-            {mmAddress ? `${mmAddress.substring(0, 6)}...` : 'Connect MetaMask'}
-          </button>
-          <button onClick={handleLogout} className="btn header-action logout-btn">
-            <LogOut size={18} />
-          </button>
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="topbar__inner">
+          <div className="topbar__brand">
+            <span className="brandmark__glyph">
+              <BrandGlyph size={18} />
+            </span>
+            <span className="brandmark__text">
+              <span className="brandmark__name">IntentPay</span>
+              <span className="brandmark__tagline">Secure wallet protocol</span>
+            </span>
+          </div>
+
+          <div className="topbar__meta">
+            <button
+              type="button"
+              className="net-chip"
+              onClick={handleSepoliaBadgeClick}
+              title="Switch the connected wallet to Sepolia"
+            >
+              <span className="net-chip__dot" />
+              Sepolia testnet
+            </button>
+
+            <div className={`custody ${custodyTone}`} title="Derived from recent security events">
+              <div className="custody__head">
+                <span className="custody__label">Custody</span>
+                <span className="custody__value">
+                  {securityStatus.score}% {securityStatus.status}
+                </span>
+              </div>
+              <div
+                className="custody__meter"
+                role="meter"
+                aria-valuenow={securityStatus.score}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Security score"
+              >
+                <div className="custody__fill" style={{ width: `${securityStatus.score}%` }} />
+              </div>
+            </div>
+
+            <div className="account">
+              <span className="account__avatar" aria-hidden="true">
+                {(userId || '?').slice(0, 2).toUpperCase()}
+              </span>
+              <span className="account__text">
+                <span className="account__name">{userId}</span>
+                <span className="account__id">{shortAddress(activeAddress)}</span>
+              </span>
+            </div>
+
+            <div className="topbar__actions">
+              <button
+                type="button"
+                onClick={connectMetaMask}
+                className={`btn btn--ghost btn--sm ${mmAddress ? 'is-active' : ''}`}
+                title={mmAddress ? `Connected: ${mmAddress}` : 'Connect a browser wallet'}
+              >
+                <Wallet size={14} />
+                {mmAddress ? shortAddress(mmAddress) : 'Connect wallet'}
+              </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="btn btn--icon"
+                title="Sign out"
+                aria-label="Sign out"
+              >
+                <LogOut size={16} />
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
-      <div className="mode-switch">
-        <button 
-          onClick={() => setMode('custodial')}
-          className={`btn mode-btn custodial ${mode === 'custodial' ? 'active' : ''}`}
-        >
-          <ShieldCheck size={14} style={{ marginRight: '8px' }} />
-          Custodial (Server)
-        </button>
-        <button 
-          onClick={() => setMode('non-custodial')}
-          className={`btn mode-btn non-custodial ${mode === 'non-custodial' ? 'active' : ''}`}
-        >
-          <ShieldAlert size={14} style={{ marginRight: '8px' }} />
-          Non-Custodial (MetaMask)
-        </button>
-      </div>
-
-      <div
-        className="balance-card floating"
-      >
-        <div className="balance-top-row">
-          <div className={`security-pill ${securityStatus.score > 80 ? 'secure' : 'warning'}`}>
-            <ShieldCheck size={16} color={securityStatus.score > 80 ? '#4ade80' : '#fbbf24'} />
-            <span>
-              Security: {securityStatus.status} ({securityStatus.score}%)
-            </span>
-          </div>
-          <button
-            onClick={handleSepoliaBadgeClick}
-            className="btn network-chip"
-            title="Switch connected wallet to Sepolia"
+      <main className="workspace">
+        <div className="workspace__main">
+          <section
+            className={`balance reveal reveal--1 ${isRefreshing ? 'is-refreshing' : ''}`}
+            aria-label="Wallet balance"
           >
-            Sepolia Testnet
-          </button>
-        </div>
-        <div className="balance-row">
-          <span style={{ fontSize: '14px', opacity: 0.8 }}>Total Balance</span>
-          <button
-            onClick={() => refreshDashboard(true)}
-            className="btn refresh-btn"
-            disabled={isRefreshing}
-            title="Refresh Balance"
-          >
-            <RefreshCw
-              size={14}
-              style={{
-                animation: isRefreshing ? 'spin 1s linear infinite' : 'none',
-                opacity: isRefreshing ? 0.5 : 1
-              }}
-            />
-          </button>
-        </div>
-        <div className="balance-amount">
-          {wallet ? `${parseFloat(wallet.balance).toFixed(4)} ETH` : '0.0000 ETH'}
-        </div>
-
-        {wallet?.address && (
-          <button
-            type="button"
-            className="address-badge"
-            onClick={copyToClipboard}
-            aria-label="Copy wallet address"
-          >
-            <span>{wallet.address.substring(0, 10)}...{wallet.address.substring(34)}</span>
-            {copied ? <CheckCircle2 size={14} color="#4ade80" /> : <Copy size={14} />}
-          </button>
-        )}
-        <div className="refresh-meta">
-          {lastRefreshAt ? `Last updated: ${lastRefreshAt.toLocaleTimeString()}` : 'Not refreshed yet'}
-        </div>
-        {refreshError && (
-          <div className="refresh-error">
-            {refreshError}
-          </div>
-        )}
-      </div>
-
-      {wallet?.contacts && Object.keys(wallet.contacts).length > 0 && (
-        <div className="glass-card" style={{ padding: '16px', marginBottom: '24px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-            <Users size={16} color="var(--primary)" />
-            <span style={{ fontSize: '14px', fontWeight: '600' }}>Contacts</span>
-          </div>
-          <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
-            {Object.entries(wallet.contacts).map(([handle, addr]) => (
-              <div 
-                key={handle} 
-                title={addr}
-                style={{ 
-                  background: 'var(--glass)', 
-                  padding: '6px 12px', 
-                  borderRadius: '20px', 
-                  fontSize: '12px',
-                  border: '1px solid var(--glass-border)',
-                  whiteSpace: 'nowrap',
-                  cursor: 'help'
-                }}
+            <div className="balance__top">
+              <span className="balance__label">Total balance</span>
+              <button
+                type="button"
+                onClick={() => refreshDashboard(true)}
+                className="btn btn--icon btn--sm"
+                style={{ marginLeft: 'auto' }}
+                disabled={isRefreshing}
+                title="Refresh balance"
+                aria-label="Refresh balance"
               >
-                {handle}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '32px' }}>
-        <div className="glass-card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div className="btn" style={{ padding: '8px', borderRadius: '10px' }}>
-            <ArrowUpRight size={18} />
-          </div>
-          <span style={{ fontSize: '14px', fontWeight: '600' }}>Send</span>
-        </div>
-        <div className="glass-card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div className="btn" style={{ padding: '8px', borderRadius: '10px', background: 'var(--secondary)' }}>
-            <ArrowDownLeft size={18} />
-          </div>
-          <span style={{ fontSize: '14px', fontWeight: '600' }}>Receive</span>
-        </div>
-      </div>
-
-      <div className="glass-card history-card">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
-          <History size={18} color="var(--primary)" />
-          <h3 style={{ fontSize: '16px' }}>Transaction History</h3>
-        </div>
-        <div className="history-list">
-          {history.length > 0 ? (
-            history.map((tx, i) => (
-              <div key={i} className="history-item">
-                <div className="history-info">
-                  <span className="history-type" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    {tx.type === 'send' ? <ArrowUpRight size={14} /> : <ArrowDownLeft size={14} />}
-                    {tx.type.toUpperCase()}
-                  </span>
-                  <span className="history-amount">{tx.amount} ETH</span>
-                </div>
-                <div className="history-details">
-                  <span title={tx.to}>
-                    To: {tx.to.startsWith('@') ? tx.to : `${tx.to.substring(0, 6)}...${tx.to.substring(38)}`}
-                  </span>
-                  <span className={`status-badge ${tx.status || 'success'}`}>
-                    {tx.status || 'success'}
-                  </span>
-                </div>
-                {tx.hash && (
-                  <div style={{ fontSize: '9px', marginTop: '4px', opacity: 0.5, fontFamily: 'monospace' }}>
-                    Hash: {tx.hash.substring(0, 20)}...
-                  </div>
-                )}
-                {tx.error && (
-                  <div style={{ fontSize: '9px', marginTop: '4px', color: '#f87171', fontStyle: 'italic' }}>
-                    Error: {tx.error}
-                  </div>
-                )}
-              </div>
-            ))
-          ) : (
-            <p style={{ fontSize: '12px', color: 'var(--text-muted)', textAlign: 'center' }}>No transactions yet.</p>
-          )}
-        </div>
-      </div>
-
-      {/* AI Assistant Drawer */}
-      <div className="ai-assistant">
-        <div className="chat-window">
-          <div className="chat-header">
-            <div className="btn" style={{ padding: '6px', borderRadius: '8px' }}>
-              <Cpu size={16} />
-            </div>
-            <div>
-              <h4 style={{ fontSize: '14px' }}>IntentPay Assistant</h4>
-              <span style={{ fontSize: '10px', color: '#4ade80' }}>Secured Path</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setVoiceEnabled((v) => !v)}
-              className="btn"
-              style={{
-                marginLeft: 'auto',
-                padding: '6px',
-                borderRadius: '8px',
-                background: voiceEnabled ? 'rgba(74, 222, 128, 0.2)' : 'var(--glass)'
-              }}
-              title={canUseSpeech ? (voiceEnabled ? 'Disable voice playback' : 'Enable voice playback') : 'Speech synthesis not supported'}
-              disabled={!canUseSpeech}
-            >
-              {voiceEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
-            </button>
-            <button
-              type="button"
-              onClick={clearChatHistory}
-              className="btn chat-clear-btn"
-              title="Clear chat history"
-            >
-              Clear
-            </button>
-          </div>
-
-          {!voiceHintDismissed && (
-            <div className="voice-hint">
-              Voice input: click mic, speak, then click mic again to transcribe.
-              <button type="button" className="voice-hint-close" onClick={() => setVoiceHintDismissed(true)}>
-                x
+                <RefreshCw size={14} className={isRefreshing ? 'is-spinning' : undefined} />
               </button>
             </div>
+
+            <div className="balance__figure">
+              {wallet ? parseFloat(wallet.balance).toFixed(4) : '0.0000'}
+              <span className="balance__unit">ETH</span>
+            </div>
+
+            <div className="balance__foot">
+              {wallet?.address && (
+                <button
+                  type="button"
+                  className={`balance__addr ${copied ? 'is-copied' : ''}`}
+                  onClick={copyToClipboard}
+                  aria-label="Copy wallet address"
+                >
+                  <span>{wallet.address.slice(0, 10)}…{wallet.address.slice(-6)}</span>
+                  {copied ? <Check size={13} /> : <Copy size={13} />}
+                </button>
+              )}
+
+              <div className="balance__stat">
+                <span className="balance__label">Updated</span>
+                <span className="balance__stat-value">
+                  {lastRefreshAt ? lastRefreshAt.toLocaleTimeString() : '—'}
+                </span>
+              </div>
+
+              <div className="balance__stat">
+                <span className="balance__label">Daily guardrail</span>
+                <span className="balance__stat-value">
+                  {wallet?.guardrails?.dailyLimit ? `${wallet.guardrails.dailyLimit} ETH` : '—'}
+                </span>
+              </div>
+            </div>
+
+            {refreshError && <p className="balance__error">{refreshError}</p>}
+          </section>
+
+          <section className="panel reveal reveal--2">
+            <div className="panel__head">
+              <span className="panel__title">
+                <ShieldCheck size={15} />
+                Execution path
+              </span>
+              <span className="panel__meta">
+                {mode === 'custodial' ? 'server signed' : 'wallet signed'}
+              </span>
+            </div>
+            <div className="panel__body">
+              <div className="seg" role="group" aria-label="Execution path">
+                <button
+                  type="button"
+                  aria-pressed={mode === 'custodial'}
+                  className={`seg__btn ${mode === 'custodial' ? 'is-active' : ''}`}
+                  onClick={() => setMode('custodial')}
+                >
+                  <ShieldCheck size={14} />
+                  Custodial
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={mode === 'non-custodial'}
+                  className={`seg__btn ${mode === 'non-custodial' ? 'is-active' : ''}`}
+                  onClick={() => setMode('non-custodial')}
+                >
+                  <ShieldAlert size={14} />
+                  Non-custodial
+                </button>
+              </div>
+
+              <div className="actions" style={{ marginTop: 16 }}>
+                <button type="button" className="action" onClick={startTransferIntent}>
+                  <span className="action__icon">
+                    <ArrowUpRight size={16} />
+                  </span>
+                  <span className="action__text">
+                    <span className="action__title">Send</span>
+                    <span className="action__hint">Draft a transfer with the assistant</span>
+                  </span>
+                </button>
+
+                <button type="button" className="action" onClick={handleReceive}>
+                  <span className="action__icon">
+                    <ArrowDownLeft size={16} />
+                  </span>
+                  <span className="action__text">
+                    <span className="action__title">Receive</span>
+                    <span className="action__hint">
+                      {receiveHint || 'Copy your deposit address'}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel reveal reveal--3">
+            <div className="panel__head">
+              <span className="panel__title">
+                <Users size={15} />
+                Contacts
+              </span>
+              <span className="panel__meta">
+                {contactEntries.length > 0 ? `${contactEntries.length} saved` : 'none yet'}
+              </span>
+            </div>
+            {contactEntries.length > 0 ? (
+              <div className="rail">
+                {contactEntries.map(([handle, addr]) => (
+                  <div key={handle} className="rail__item" title={addr}>
+                    <span className="rail__handle">{handle}</span>
+                    <span className="rail__addr">{shortAddress(addr)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="rail__empty">
+                No contacts yet. Tell the assistant “remember @alice is 0x…” to save one.
+              </p>
+            )}
+          </section>
+
+          <TransactionLedger transactions={history} />
+
+          <section className="panel reveal reveal--4">
+            <div className="panel__head">
+              <span className="panel__title">
+                <ScrollText size={15} />
+                Security log
+              </span>
+              <span className="panel__meta">
+                {recentLogs.length > 0 ? `last ${recentLogs.length}` : 'quiet'}
+              </span>
+            </div>
+            {recentLogs.length > 0 ? (
+              <div className="audit">
+                {recentLogs.map((entry, index) => (
+                  <div
+                    key={`${entry.timestamp || 'log'}-${index}`}
+                    className={`audit__row sev--${entry.severity || 'low'}`}
+                  >
+                    <span className="audit__dot" aria-hidden="true" />
+                    <span className="audit__event">{entry.event}</span>
+                    <span className="audit__time">
+                      {entry.timestamp
+                        ? new Date(entry.timestamp).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })
+                        : '—'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="audit__empty">No security events recorded for this wallet.</p>
+            )}
+          </section>
+        </div>
+
+        <aside className="workspace__side">
+          {voiceMode && (
+            <VoiceConsole
+              state={voiceState}
+              supported={wakeWordSupported}
+              error={voiceError}
+              hint={voiceHint}
+              transcript={voiceTranscript}
+              log={voiceLog}
+              showHelp={showVoiceHelp}
+              fallbackAvailable={canUseWhisperSpeechToText}
+              fallbackListening={fallbackListening}
+              onClose={stopVoiceMode}
+              onToggleHelp={() => setShowVoiceHelp((v) => !v)}
+              onFallbackToggle={toggleFallbackRecording}
+              onStopSpeaking={stopSpeaking}
+            />
           )}
 
-          <div className="chat-messages" role="log" aria-live="polite" aria-relevant="additions text">
-            {messages.map((m, i) => (
-              <div key={i} className={`message ${m.role}`}>
-                {m.content}
-              </div>
-            ))}
-            {loading && <div className="message ai">...</div>}
-            <div ref={chatEndRef} />
-          </div>
+          <div className="chat">
+            <div className="chat__head">
+              <span className="chat__id">
+                <Cpu size={15} />
+              </span>
+              <span className="chat__titling">
+                <span className="chat__title">IntentPay Assistant</span>
+                <span className="chat__sub">prepares · never signs</span>
+              </span>
 
-          <form onSubmit={sendMessage} className="chat-input-area">
-            <button
-              type="button"
-              onClick={isListening ? stopSpeechToText : startSpeechToText}
-              className="btn"
-              style={{
-                padding: '10px',
-                background: isListening ? 'rgba(239, 68, 68, 0.25)' : 'var(--glass)'
-              }}
-              title={canUseSpeechToText ? (isListening ? 'Stop voice input' : 'Start voice input') : 'Speech-to-text not supported'}
+              <div className="chat__actions">
+                <button
+                  type="button"
+                  onClick={toggleVoiceMode}
+                  className={`btn btn--icon ${voiceMode ? 'is-active' : ''}`}
+                  title={
+                    voiceModeAvailable
+                      ? voiceMode ? 'Turn off voice mode' : 'Turn on hands-free voice mode'
+                      : 'Voice mode needs a browser with microphone support'
+                  }
+                  disabled={!voiceModeAvailable}
+                  aria-pressed={voiceMode}
+                  aria-label="Hands-free voice mode"
+                >
+                  {voiceMode ? <Radio size={15} /> : <Ear size={15} />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVoiceEnabled((v) => !v)}
+                  className={`btn btn--icon ${voiceEnabled && !voiceMode ? 'is-active' : ''}`}
+                  title={
+                    voiceMode
+                      ? 'Voice mode always speaks replies'
+                      : canUseSpeech
+                        ? voiceEnabled ? 'Disable spoken replies' : 'Speak replies aloud'
+                        : 'Speech synthesis is not supported'
+                  }
+                  disabled={!canUseSpeech || voiceMode}
+                  aria-pressed={voiceEnabled || voiceMode}
+                  aria-label="Spoken replies"
+                >
+                  {voiceEnabled || voiceMode ? <Volume2 size={15} /> : <VolumeX size={15} />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={clearChatHistory}
+                  className="btn btn--icon"
+                  title="Clear transcript"
+                  aria-label="Clear transcript"
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </div>
+
+            {!voiceHintDismissed && !voiceMode && (
+              <div className="notice">
+                <span className="notice__text">
+                  Voice input: tap the mic, speak, tap again to transcribe.
+                </span>
+                <button type="button" className="notice__cta" onClick={toggleVoiceMode}>
+                  Go hands-free
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--icon btn--sm"
+                  onClick={() => setVoiceHintDismissed(true)}
+                  aria-label="Dismiss voice hint"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
+            <div className="chat__log" role="log" aria-live="polite" aria-relevant="additions text">
+              {messages.map((m, i) => {
+                const raw = typeof m.content === 'string' ? m.content : '';
+                const isThinking = raw.startsWith('*Thinking:');
+                const body = isThinking ? raw.replace(/^\*Thinking:\s*/, '').replace(/\*$/, '') : raw;
+                return (
+                  <div
+                    key={i}
+                    className={`message ${m.role === 'user' ? 'message--user' : 'message--ai'}${
+                      isThinking ? ' message--thinking' : ''
+                    }`}
+                  >
+                    {isThinking ? `Thinking: ${body}` : body}
+                  </div>
+                );
+              })}
+              {loading && (
+                <div className="chat__typing" aria-label="Assistant is working">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <form onSubmit={sendMessage} className="chat__composer">
+              <button
+                type="button"
+                onClick={isListening ? stopSpeechToText : startSpeechToText}
+                className={`btn btn--icon ${isListening ? 'is-active' : ''}`}
+                disabled={fallbackListening}
+                title={
+                  canUseSpeechToText
+                    ? isListening ? 'Stop voice input' : 'Start voice input'
+                    : 'Speech-to-text is not supported'
+                }
+                aria-label="Voice input"
               >
-              {isListening ? <MicOff size={18} /> : <Mic size={18} />}
-            </button>
-            <input
-              type="text"
-              className="input-field"
-              style={{ marginBottom: 0 }}
-              placeholder={isListening ? "Listening..." : "Ask AI to send ETH..."}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-            />
-            <button type="submit" className="btn" style={{ padding: '10px' }}>
-              <Send size={18} />
-            </button>
-          </form>
-        </div>
-      </div>
+                {isListening ? <MicOff size={16} /> : <Mic size={16} />}
+              </button>
+
+              <input
+                ref={chatInputRef}
+                type="text"
+                className="field__input"
+                placeholder={
+                  voiceMode
+                    ? 'Voice mode is on — you can still type'
+                    : isListening ? 'Listening…' : 'Describe a payment…'
+                }
+                aria-label="Message the assistant"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+              />
+
+              <button
+                type="submit"
+                className="btn btn--icon"
+                title="Send"
+                aria-label="Send message"
+                disabled={!input.trim()}
+              >
+                <Send size={16} />
+              </button>
+            </form>
+          </div>
+        </aside>
+      </main>
     </div>
   );
 }

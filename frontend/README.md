@@ -1,16 +1,46 @@
-# React + Vite
+# IntentPay — frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The React client for IntentPay. It talks to the Express API in the repository
+root; it has no server logic of its own.
 
-Currently, two official plugins are available:
+```bash
+npm install
+npm run dev     # http://localhost:5173
+npm test        # vitest
+npm run build    # production bundle in dist/
+npm run lint
+```
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Configuration
 
-## React Compiler
+The API base URL defaults to `http://localhost:3000/api`. Override it with a
+`.env` file in this directory:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```env
+VITE_API_BASE=http://localhost:3000/api
+```
 
-## Expanding the ESLint configuration
+That port has to match `PORT` in the backend's `.env`.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Layout
+
+```text
+src/
+  App.jsx                       app shell, dashboard, assistant panel
+  index.css                     design tokens, base layer, shared primitives
+  App.css                       component styles
+  components/
+    VoiceConsole.jsx            voice mode panel
+    TransactionLedger.jsx       transaction history as a statement table
+    BrandGlyph.jsx              the wordmark
+  lib/
+    voice-mode.js               wake-word engine, voice command grammar, speech
+    intent-voice.js             Whisper fallback recorder with silence detection
+    redaction.js                strips secrets before they reach the screen or storage
+  config/api.js                 API base URL
+  __tests__/                    vitest suites
+```
+
+Voice mode needs a browser with the Web Speech API for wake-word listening
+(Chrome or Edge). Elsewhere the console falls back to a tap-to-speak recorder
+backed by Whisper via `@xenova/transformers`.
