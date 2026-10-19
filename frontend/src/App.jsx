@@ -37,12 +37,23 @@ import {
 import VoiceConsole from './components/VoiceConsole';
 import TransactionLedger from './components/TransactionLedger';
 import BrandGlyph from './components/BrandGlyph';
+import ThemeToggle from './components/ThemeToggle';
+import { isThemePref, nextThemePref, resolveTheme } from './lib/theme';
 import './App.css';
 
 const SEPOLIA_CHAIN_ID = '0xaa36a7'; // 11155111
 const CHAT_HISTORY_PREFIX = 'onchain_chat_history_';
 const MAX_STORED_MESSAGES = 200;
 const FALLBACK_SILENCE_MS = 1400;
+
+// First-run prompts. They draft into the composer instead of sending, so nothing
+// leaves the browser until the user presses send.
+const CHAT_SUGGESTIONS = [
+  'What is my balance?',
+  'Send 0.01 ETH to @alice',
+  'Show my transaction history',
+  'Explain gas fees in simple terms'
+];
 
 function extractResetSecret(message) {
   if (!message || typeof message !== 'string') return '';
@@ -96,6 +107,10 @@ function App() {
   const [showVoiceHelp, setShowVoiceHelp] = useState(false);
   const [fallbackListening, setFallbackListening] = useState(false);
   const [receiveHint, setReceiveHint] = useState('');
+  const [themePref, setThemePref] = useState(() => {
+    const stored = localStorage.getItem('intentpay-theme');
+    return isThemePref(stored) ? stored : 'system';
+  });
 
   const chatEndRef = useRef(null);
   const chatInputRef = useRef(null);
@@ -260,6 +275,34 @@ function App() {
       setIsRefreshing(false);
     }
   }, [authHeaders, userId, clearAuthAndReturnToLogin]);
+
+  /**
+   * Theme is a preference, not just a palette switch: "system" follows the OS
+   * until the user makes an explicit choice, and index.html has already applied
+   * the resolved value before first paint so there is no flash.
+   */
+  const [systemPrefersLight, setSystemPrefersLight] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: light)').matches
+  );
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = (event) => setSystemPrefersLight(event.matches);
+    media.addEventListener?.('change', onChange);
+    return () => media.removeEventListener?.('change', onChange);
+  }, []);
+
+  const resolvedTheme = resolveTheme(themePref, systemPrefersLight);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    localStorage.setItem('intentpay-theme', themePref);
+  }, [themePref, resolvedTheme]);
+
+  const cycleTheme = () => {
+    setThemePref((current) => nextThemePref(current));
+  };
+
 
   useEffect(() => {
     localStorage.removeItem('password');
@@ -994,6 +1037,15 @@ function App() {
     : securityStatus.score > 50 ? 'is-warning' : 'is-critical';
 
   const activeAddress = mode === 'non-custodial' && mmAddress ? mmAddress : wallet?.address;
+  const guardrails = wallet?.guardrails || {};
+  const dailyLimit = parseFloat(guardrails.dailyLimit || '0') || 0;
+  // The server rolls the daily counter lazily, so a stale date means "nothing spent".
+  const todayKey = new Date().toISOString().split('T')[0];
+  const spentToday = guardrails.lastSpentDate === todayKey
+    ? (parseFloat(guardrails.spentToday || '0') || 0)
+    : 0;
+  const limitPct = dailyLimit > 0 ? Math.min(100, Math.round((spentToday / dailyLimit) * 100)) : 0;
+  const whitelistCount = Array.isArray(guardrails.whitelist) ? guardrails.whitelist.length : 0;
   const contactEntries = wallet?.contacts ? Object.entries(wallet.contacts) : [];
   const recentLogs = securityStatus.recentLogs || [];
 
@@ -1002,6 +1054,13 @@ function App() {
       <div className="app-shell">
         <div className="auth">
           <div className="auth__card reveal">
+          <div className="auth__theme">
+            <ThemeToggle
+              preference={themePref}
+              resolved={resolvedTheme}
+              onCycle={cycleTheme}
+            />
+          </div>
             <aside className="auth__aside">
               <div className="topbar__brand">
                 <span className="brandmark__glyph">
@@ -1173,6 +1232,11 @@ function App() {
             </div>
 
             <div className="topbar__actions">
+              <ThemeToggle
+                preference={themePref}
+                resolved={resolvedTheme}
+                onCycle={cycleTheme}
+              />
               <button
                 type="button"
                 onClick={connectMetaMask}
@@ -1222,6 +1286,28 @@ function App() {
               <span className="balance__unit">ETH</span>
             </div>
 
+            <div className="balance__allowance">
+              <div className="balance__allowance-head">
+                <span className="balance__label">Daily allowance</span>
+                <span className="balance__allowance-value">
+                  {spentToday.toFixed(4)} / {dailyLimit > 0 ? dailyLimit.toFixed(2) : '0.00'} ETH
+                </span>
+              </div>
+              <div
+                className="meter"
+                role="meter"
+                aria-valuenow={limitPct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Share of the daily allowance used"
+              >
+                <div
+                  className={`meter__fill${limitPct >= 100 ? ' is-out' : limitPct >= 80 ? ' is-near' : ''}`}
+                  style={{ width: `${limitPct}%` }}
+                />
+              </div>
+            </div>
+
             <div className="balance__foot">
               {wallet?.address && (
                 <button
@@ -1243,9 +1329,9 @@ function App() {
               </div>
 
               <div className="balance__stat">
-                <span className="balance__label">Daily guardrail</span>
+                <span className="balance__label">Recipients</span>
                 <span className="balance__stat-value">
-                  {wallet?.guardrails?.dailyLimit ? `${wallet.guardrails.dailyLimit} ETH` : '—'}
+                  {whitelistCount === 0 ? 'Any address' : `${whitelistCount} allowed`}
                 </span>
               </div>
             </div>
@@ -1491,6 +1577,25 @@ function App() {
                   <span />
                   <span />
                   <span />
+                </div>
+              )}
+
+              {!loading && messages.length <= 1 && (
+                <div className="chat__suggestions">
+                  <span className="chat__suggestions-title">Try asking</span>
+                  {CHAT_SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      className="chat__suggestion"
+                      onClick={() => {
+                        setInput(suggestion);
+                        chatInputRef.current?.focus();
+                      }}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
                 </div>
               )}
               <div ref={chatEndRef} />

@@ -19,6 +19,19 @@
   >
 
   <title>IntentPay — Secure Wallet Protocol</title>
+  <script>
+    // Resolve the theme before first paint so there is no flash of the wrong one.
+    (function () {
+      try {
+        var saved = localStorage.getItem('intentpay-theme');
+        var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+        var theme = saved === 'light' || saved === 'dark' ? saved : (prefersLight ? 'light' : 'dark');
+        document.documentElement.dataset.theme = theme;
+      } catch (error) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    })();
+  </script>
 </head>
 
 <body>

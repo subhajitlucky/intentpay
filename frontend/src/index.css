@@ -1,45 +1,68 @@
 /* ===========================================================================
    IntentPay — design tokens and base layer
-   Aesthetic direction: "private ledger terminal".
-   Warm near-black surfaces, one brass accent, hairline rules, tabular data.
+   Two themes, one semantic vocabulary. Components never name a colour
+   directly: they reference surface/line/text/accent roles that each theme
+   redefines. Dark is "private ledger by night", light is "warm paper".
    =========================================================================== */
-
-/* Fonts are requested from index.html so they do not block this stylesheet. */
 
 :root {
   color-scheme: dark;
 
-  /* Surfaces, darkest to lightest */
-  --void: #08090a;
-  --ink-900: #0b0c0d;
-  --ink-850: #0f1112;
-  --ink-800: #131516;
-  --ink-700: #191c1e;
-  --ink-600: #212527;
+  /* Surfaces */
+  --bg: #08090a;
+  --surface-sunken: #0b0c0d;
+  --surface: #0f1112;
+  --surface-raised: #131516;
+  --surface-hover: #191c1e;
+  --surface-active: #212527;
 
   /* Hairlines do the work that borders and shadows do elsewhere */
-  --line: rgba(255, 255, 255, 0.06);
-  --line-2: rgba(255, 255, 255, 0.10);
-  --line-3: rgba(255, 255, 255, 0.16);
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --line-3: rgba(255, 255, 255, 0.17);
 
-  /* Type */
+  /* Text */
   --text: #eae7e1;
   --text-2: #a5a29b;
   --text-3: #706c66;
 
-  /* The single accent: brass */
-  --brass: #c8a24a;
-  --brass-hi: #e2c179;
-  --brass-lo: rgba(200, 162, 74, 0.10);
-  --brass-line: rgba(200, 162, 74, 0.32);
+  /* The single accent: brass, split by role */
+  --accent: #c8a24a;
+  --accent-strong: #a8842f;
+  --accent-bright: #e2c179;
+  --accent-ink: #e2c179;
+  --accent-lo: rgba(200, 162, 74, 0.10);
+  --accent-line: rgba(200, 162, 74, 0.32);
+  --accent-contrast: #1a1405;
 
-  /* Semantic status (deliberately distinct from the brass accent) */
+  /* Status, each with a text-safe variant */
   --jade: #4aa383;
+  --jade-ink: #6fc4a3;
   --jade-lo: rgba(74, 163, 131, 0.12);
+  --jade-line: rgba(74, 163, 131, 0.32);
   --brick: #bd5a55;
+  --brick-ink: #e2a9a6;
   --brick-lo: rgba(189, 90, 85, 0.12);
+  --brick-line: rgba(189, 90, 85, 0.34);
   --slate: #7c8894;
+  --slate-ink: #a9b4be;
   --slate-lo: rgba(124, 136, 148, 0.12);
+  --slate-line: rgba(124, 136, 148, 0.32);
+
+  /* Effects */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 28px 70px -36px rgba(0, 0, 0, 0.95), 0 2px 10px rgba(0, 0, 0, 0.35);
+  --inner-hi: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --ring: rgba(200, 162, 74, 0.45);
+  --grain-opacity: 0.03;
+  --glow-1: rgba(200, 162, 74, 0.07);
+  --glow-2: rgba(120, 140, 160, 0.05);
+  --panel-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.014), transparent 42%);
+  --hover-wash: rgba(255, 255, 255, 0.016);
+  --chip-wash: rgba(255, 255, 255, 0.014);
+  --row-head: rgba(255, 255, 255, 0.012);
+  --bar-track: rgba(255, 255, 255, 0.10);
+  --glass: rgba(26, 34, 39, 0.82);
 
   /* Families */
   --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
@@ -58,14 +81,120 @@
   --base: 220ms;
   --slow: 460ms;
 
-  /* Elevation */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-2: 0 28px 70px -36px rgba(0, 0, 0, 0.95), 0 2px 10px rgba(0, 0, 0, 0.35);
-  --inner-hi: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-
   /* Layout */
   --rail: 396px;
   --page-max: 1400px;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f5f2ec;
+  --surface-sunken: #f7f3ea;
+  --surface: #fffdf9;
+  --surface-raised: #fbf8f2;
+  --surface-hover: #f2ede3;
+  --surface-active: #e9e2d5;
+
+  --line: rgba(40, 32, 16, 0.10);
+  --line-2: rgba(40, 32, 16, 0.16);
+  --line-3: rgba(40, 32, 16, 0.26);
+
+  --text: #1d1a14;
+  --text-2: #565046;
+  --text-3: #7b7364;
+
+  --accent: #c08f2e;
+  --accent-strong: #8f6a18;
+  --accent-bright: #d9a94a;
+  --accent-ink: #7d5c14;
+  --accent-lo: rgba(192, 143, 46, 0.14);
+  --accent-line: rgba(192, 143, 46, 0.42);
+  --accent-contrast: #241a06;
+
+  --jade: #2f8264;
+  --jade-ink: #236a51;
+  --jade-lo: rgba(47, 130, 100, 0.10);
+  --jade-line: rgba(47, 130, 100, 0.30);
+  --brick: #b4483f;
+  --brick-ink: #963a32;
+  --brick-lo: rgba(180, 72, 63, 0.09);
+  --brick-line: rgba(180, 72, 63, 0.28);
+  --slate: #63707c;
+  --slate-ink: #56626d;
+  --slate-lo: rgba(99, 112, 124, 0.10);
+  --slate-line: rgba(99, 112, 124, 0.26);
+
+  --shadow-1: 0 1px 2px rgba(40, 32, 16, 0.06);
+  --shadow-2: 0 24px 60px -36px rgba(40, 32, 16, 0.30), 0 1px 3px rgba(40, 32, 16, 0.06);
+  --inner-hi: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  --ring: rgba(184, 137, 42, 0.45);
+  --grain-opacity: 0.018;
+  --glow-1: rgba(200, 162, 74, 0.16);
+  --glow-2: rgba(140, 165, 190, 0.10);
+  --panel-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.75), transparent 42%);
+  --hover-wash: rgba(40, 32, 16, 0.035);
+  --chip-wash: rgba(40, 32, 16, 0.03);
+  --row-head: rgba(40, 32, 16, 0.035);
+  --bar-track: rgba(40, 32, 16, 0.12);
+  --glass: rgba(255, 253, 249, 0.88);
+}
+
+/* No JavaScript: follow the operating system. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+
+    --bg: #f5f2ec;
+    --surface-sunken: #f7f3ea;
+    --surface: #fffdf9;
+    --surface-raised: #fbf8f2;
+    --surface-hover: #f2ede3;
+    --surface-active: #e9e2d5;
+
+    --line: rgba(40, 32, 16, 0.10);
+    --line-2: rgba(40, 32, 16, 0.16);
+    --line-3: rgba(40, 32, 16, 0.26);
+
+    --text: #1d1a14;
+    --text-2: #565046;
+    --text-3: #7b7364;
+
+    --accent: #c08f2e;
+    --accent-strong: #8f6a18;
+    --accent-bright: #d9a94a;
+    --accent-ink: #7d5c14;
+    --accent-lo: rgba(192, 143, 46, 0.14);
+    --accent-line: rgba(192, 143, 46, 0.42);
+    --accent-contrast: #241a06;
+
+    --jade: #2f8264;
+    --jade-ink: #236a51;
+    --jade-lo: rgba(47, 130, 100, 0.10);
+    --jade-line: rgba(47, 130, 100, 0.30);
+    --brick: #b4483f;
+    --brick-ink: #963a32;
+    --brick-lo: rgba(180, 72, 63, 0.09);
+    --brick-line: rgba(180, 72, 63, 0.28);
+    --slate: #63707c;
+    --slate-ink: #56626d;
+    --slate-lo: rgba(99, 112, 124, 0.10);
+    --slate-line: rgba(99, 112, 124, 0.26);
+
+    --shadow-1: 0 1px 2px rgba(40, 32, 16, 0.06);
+    --shadow-2: 0 24px 60px -36px rgba(40, 32, 16, 0.30), 0 1px 3px rgba(40, 32, 16, 0.06);
+    --inner-hi: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    --ring: rgba(184, 137, 42, 0.45);
+    --grain-opacity: 0.018;
+    --glow-1: rgba(200, 162, 74, 0.16);
+    --glow-2: rgba(140, 165, 190, 0.10);
+    --panel-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.75), transparent 42%);
+    --hover-wash: rgba(40, 32, 16, 0.035);
+    --chip-wash: rgba(40, 32, 16, 0.03);
+    --row-head: rgba(40, 32, 16, 0.035);
+    --bar-track: rgba(40, 32, 16, 0.12);
+    --glass: rgba(255, 253, 249, 0.88);
+  }
 }
 
 *,
@@ -86,25 +215,25 @@ body {
   font-size: 15px;
   line-height: 1.55;
   color: var(--text);
-  background-color: var(--void);
-  /* Two soft light sources keep the page from reading as flat black. */
+  background-color: var(--bg);
   background-image:
-    radial-gradient(120% 80% at 12% -10%, rgba(200, 162, 74, 0.07), transparent 60%),
-    radial-gradient(90% 60% at 100% 0%, rgba(120, 140, 160, 0.05), transparent 55%);
+    radial-gradient(120% 80% at 12% -10%, var(--glow-1), transparent 60%),
+    radial-gradient(90% 60% at 100% 0%, var(--glow-2), transparent 55%);
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  transition: background-color var(--base) var(--ease), color var(--base) var(--ease);
 }
 
-/* Film grain, very low opacity: texture without noise. */
+/* Film grain: texture without noise. Kept faint in light mode. */
 body::after {
   content: '';
   position: fixed;
   inset: 0;
   z-index: 9999;
   pointer-events: none;
-  opacity: 0.03;
+  opacity: var(--grain-opacity);
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -143,7 +272,7 @@ textarea {
 }
 
 a {
-  color: var(--brass-hi);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 
@@ -153,20 +282,21 @@ a:hover {
 }
 
 :focus-visible {
-  outline: 2px solid var(--brass);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--r-xs);
+  box-shadow: 0 0 0 4px var(--ring);
 }
 
 ::selection {
-  background: rgba(200, 162, 74, 0.28);
-  color: #fff;
+  background: var(--accent-lo);
+  color: var(--text);
 }
 
-/* Scrollbars, kept in the palette */
+/* Scrollbars, in the palette */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--ink-600) transparent;
+  scrollbar-color: var(--line-3) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -179,20 +309,19 @@ a:hover {
 }
 
 *::-webkit-scrollbar-thumb {
-  background: var(--ink-600);
+  background: var(--line-3);
   border: 2px solid transparent;
   background-clip: content-box;
   border-radius: var(--r-pill);
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: #2c3134;
+  background: var(--text-3);
   background-clip: content-box;
 }
 
 /* Shared primitives -------------------------------------------------------- */
 
-/* Small uppercase technical label used across panels and headers. */
 .tag {
   font-family: var(--font-mono);
   font-size: 10px;

@@ -28,6 +28,7 @@ IntentPay experiments with a higher-level workflow:
 - Gas estimation and structured transaction errors.
 - Spending guardrails and whitelisted recipient concepts.
 - Voice mode: hands-free wake-word control with spoken replies and spoken approvals.
+- Light and dark themes that follow the operating system until you choose one.
 - Transaction history with status and hashes.
 - Security event logging for suspicious or failed actions.
 
@@ -127,6 +128,7 @@ The execution boundary holds under adversarial input:
 - Ethers.js v6
 - OpenRouter-compatible LLM API
 - Web Speech API (voice mode; Whisper via `@xenova/transformers` as fallback)
+- Hand-written CSS with a semantic token layer (no UI framework)
 - AES-256-GCM
 - bcrypt
 

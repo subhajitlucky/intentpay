@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -44,8 +44,33 @@ function formatWhen(iso) {
  * The transaction history as a statement rather than a feed of cards:
  * fixed columns, tabular figures, right-aligned amounts, one status chip.
  */
+const FILTERS = [
+  { id: 'all', label: 'All' },
+  { id: 'out', label: 'Out' },
+  { id: 'in', label: 'In' }
+];
+
+function matchesFilter(tx, filter) {
+  if (filter === 'in') return tx.type === 'receive';
+  if (filter === 'out') return tx.type !== 'receive';
+  return true;
+}
+
 export default function TransactionLedger({ transactions = [] }) {
+  const [filter, setFilter] = useState('all');
   const count = transactions.length;
+
+  // Counts are per filter so the chips double as a summary of the ledger.
+  const counts = useMemo(() => ({
+    all: count,
+    out: transactions.filter((tx) => matchesFilter(tx, 'out')).length,
+    in: transactions.filter((tx) => matchesFilter(tx, 'in')).length
+  }), [transactions, count]);
+
+  const visible = useMemo(
+    () => transactions.filter((tx) => matchesFilter(tx, filter)),
+    [transactions, filter]
+  );
 
   return (
     <section className="panel reveal reveal--4" aria-label="Transaction ledger">
@@ -72,6 +97,21 @@ export default function TransactionLedger({ transactions = [] }) {
         </div>
       ) : (
         <>
+          <div className="ledger__filters" role="group" aria-label="Filter transactions">
+            {FILTERS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={`chip${filter === option.id ? ' is-active' : ''}`}
+                onClick={() => setFilter(option.id)}
+                aria-pressed={filter === option.id}
+              >
+                {option.label}
+                <span className="chip__count">{counts[option.id]}</span>
+              </button>
+            ))}
+          </div>
+
           <div className="ledger__head" aria-hidden="true">
             <span>Type</span>
             <span>Counterparty</span>
@@ -79,7 +119,10 @@ export default function TransactionLedger({ transactions = [] }) {
             <span style={{ textAlign: 'right' }}>Status</span>
           </div>
           <div className="ledger__body">
-            {transactions.map((tx, index) => {
+            {visible.length === 0 && (
+              <p className="rail__empty">No transactions match this filter.</p>
+            )}
+            {visible.map((tx, index) => {
               const { label, Icon } = TYPE_MAP[tx.type] || TYPE_MAP.send;
               const isIncoming = tx.type === 'receive';
               return (

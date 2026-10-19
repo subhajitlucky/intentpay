@@ -11,6 +11,7 @@ import {
   sanitizeForSpeech
 } from '../lib/voice-mode'
 import { redactSensitiveContent, sanitizeMessagesForStorage } from '../lib/redaction'
+import { isThemePref, nextThemePref, resolveTheme } from '../lib/theme'
 
 describe('normalizeTranscript', () => {
   it('glues the product name back together however it was transcribed', () => {
@@ -246,5 +247,31 @@ describe('VoiceModeEngine support probing', () => {
     const engine = new VoiceModeEngine({ onCommand: (command) => received.push(command) })
     engine.dispatch('   ')
     expect(received).toHaveLength(0)
+  })
+})
+
+describe('theme preference', () => {
+  it('follows the OS until the user chooses', () => {
+    expect(resolveTheme('system', true)).toBe('light')
+    expect(resolveTheme('system', false)).toBe('dark')
+  })
+
+  it('honours an explicit choice over the OS', () => {
+    expect(resolveTheme('dark', true)).toBe('dark')
+    expect(resolveTheme('light', false)).toBe('light')
+  })
+
+  it('cycles system -> light -> dark -> system', () => {
+    expect(nextThemePref('system')).toBe('light')
+    expect(nextThemePref('light')).toBe('dark')
+    expect(nextThemePref('dark')).toBe('system')
+  })
+
+  it('rejects a corrupted stored preference', () => {
+    expect(isThemePref('light')).toBe(true)
+    expect(isThemePref('dark')).toBe(true)
+    expect(isThemePref('system')).toBe(true)
+    expect(isThemePref('midnight')).toBe(false)
+    expect(isThemePref(null)).toBe(false)
   })
 })

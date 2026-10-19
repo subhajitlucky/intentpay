@@ -30,16 +30,18 @@ That port has to match `PORT` in the backend's `.env`.
 ```text
 src/
   App.jsx                       app shell, dashboard, assistant panel
-  index.css                     design tokens, base layer, shared primitives
+  index.css                     design tokens for both themes, base layer, primitives
   App.css                       component styles
   components/
     VoiceConsole.jsx            voice mode panel
+    ThemeToggle.jsx             three-state theme control
     TransactionLedger.jsx       transaction history as a statement table
     BrandGlyph.jsx              the wordmark
   lib/
     voice-mode.js               wake-word engine, voice command grammar, speech
     intent-voice.js             Whisper fallback recorder with silence detection
     redaction.js                strips secrets before they reach the screen or storage
+    theme.js                    system/light/dark resolution and cycling
   config/api.js                 API base URL
   __tests__/                    vitest suites
 ```
