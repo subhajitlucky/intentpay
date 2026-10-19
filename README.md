@@ -256,7 +256,16 @@ a mounted volume loses it when the container is recreated without one.
 ### One container (recommended for a demo)
 
 The image builds the client with a same-origin API base and serves everything
-from one port, so there is no CORS configuration to get wrong:
+from one port, so there is no CORS configuration to get wrong. `compose.yaml`
+wraps it for local use:
+
+```bash
+cp .env.example .env     # then edit ENCRYPTION_KEY (32 chars) and OPENROUTER_API_KEY
+docker compose up -d --build
+```
+
+Open `http://localhost:3000`. Wallets persist in `./data`, and the container
+comes back after a reboot. Without compose:
 
 ```bash
 docker build -t intentpay .
@@ -265,7 +274,7 @@ docker run -d --name intentpay -p 3000:3000 \
   -e ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(16).toString('hex'))") \
   -e RPC_URL=https://ethereum-sepolia-rpc.publicnode.com \
   -e OPENROUTER_API_KEY=sk-or-v1-... \
-  -v intentpay-data:/app/data \
+  -v "$PWD/data:/app/data" \
   intentpay
 ```
 

@@ -1,0 +1,25 @@
+# Local stack: one command, one URL, wallets kept on your disk.
+#
+#   docker compose up -d --build     start (and rebuild after code changes)
+#   docker compose logs -f           follow logs
+#   docker compose down              stop (./data keeps the wallets)
+#
+# Editing .env and re-running `docker compose up -d` recreates the container with
+# the new values; a plain `restart` would keep the old environment.
+#
+# The health check comes from the image, not from here.
+
+services:
+  intentpay:
+    build: .
+    image: intentpay
+    container_name: intentpay
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      # The JSON keystore. Wallets live here, so it must be a real directory on
+      # the host rather than inside the container.
+      - ./data:/app/data
+    restart: unless-stopped
