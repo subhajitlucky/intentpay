@@ -13,7 +13,7 @@
       ? saved
       : (prefersLight ? 'light' : 'dark');
     document.documentElement.dataset.theme = theme;
-  } catch (error) {
+  } catch {
     document.documentElement.dataset.theme = 'dark';
   }
 })();
